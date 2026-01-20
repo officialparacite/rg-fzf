@@ -121,6 +121,9 @@ See all types: `rg --type-list`
 - **Filename filter uses glob, not fuzzy**: When you switch back to content mode, the filename filter becomes a glob pattern (`*pattern*`), not fuzzy search. Type substrings that actually appear in filenames.
 - **No multiline search**: `\n` in patterns won't match across lines (ripgrep limitation with fzf integration).
 
+[!NOTE]
+> It might crash if you have lots of files with many lines due to an fzf limitation. You can work around this by typing a few characters instead of waiting for it to load everything.
+
 ## License
 
 MIT
