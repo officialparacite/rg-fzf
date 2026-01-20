@@ -7,25 +7,25 @@ Usage: rg-fzf [options] [paths...]
 Options:
   -t, --type TYPE     Filter by file type (js, py, ts, etc.)
                       Can be used multiple times: -t js -t ts
-  -r, --replace       Enable search & replace mode (with prompt)
-  -R, --replace-no-prompt  Replace without prompting
   -h, --help          Show help
 
 Keybindings:
   Ctrl-F    Toggle content/filename mode
+  Ctrl-R    Enter replace mode
   Ctrl-I    Toggle case sensitivity
   Ctrl-V    Toggle invert match
   Ctrl-P    Toggle preview
   Ctrl-D    Scroll preview down
   Ctrl-U    Scroll preview up
-  Enter     Open in editor
+  Tab       Select multiple files
+  Enter     Open in editor (content/filename mode) or apply replace (replace mode)
+  Esc       Exit
 
 Examples:
   rg-fzf                        # Search current directory
   rg-fzf src/                   # Search in src/
   rg-fzf -t js -t ts src/       # Search only .js and .ts files in src/
   rg-fzf file1.txt file2.txt    # Search specific files
-  rg-fzf -r src/                # Search & replace mode
 EOF
     exit 0
 }
@@ -33,7 +33,6 @@ EOF
 # Defaults
 TYPES=()
 PATHS=()
-REPLACE_MODE=""
 
 # Parse arguments
 while [[ $# -gt 0 ]]; do
@@ -41,14 +40,6 @@ while [[ $# -gt 0 ]]; do
         -t|--type)
             TYPES+=("--type" "$2")
             shift 2
-            ;;
-        -r|--replace)
-            REPLACE_MODE="prompt"
-            shift
-            ;;
-        -R|--replace-no-prompt)
-            REPLACE_MODE="no-prompt"
-            shift
             ;;
         -h|--help)
             show_help
@@ -98,87 +89,94 @@ fi
 SCRIPT
 chmod +x "$SEARCH_SCRIPT"
 
-# Create replace script
-REPLACE_SCRIPT=$(mktemp)
-cat >"$REPLACE_SCRIPT" <<'SCRIPT'
+# Create preview script for replace mode
+REPLACE_PREVIEW=$(mktemp)
+cat >"$REPLACE_PREVIEW" <<'SCRIPT'
 #!/bin/bash
-SEARCH="$1"
-REPLACE="$2"
-MODE="$3"
-shift 3
+FILE="$1"
+LINE="$2"
+SEARCH=$(cat /tmp/fzf-search-q 2>/dev/null)
+REPLACE="$3"
+
+if [[ -z "$SEARCH" ]]; then
+    bat --color=always --highlight-line "$LINE" "$FILE" 2>/dev/null || cat "$FILE"
+    exit 0
+fi
+
+if [[ -z "$REPLACE" ]]; then
+    echo "Type replacement string..."
+    echo ""
+    bat --color=always --highlight-line "$LINE" "$FILE" 2>/dev/null || cat "$FILE"
+    exit 0
+fi
+
+echo "━━━ Preview: Replace '$SEARCH' → '$REPLACE' ━━━"
+echo ""
+echo "Before:"
+echo "-------"
+grep -n "$SEARCH" "$FILE" 2>/dev/null | head -10
+echo ""
+echo "After:"
+echo "------"
+sed "s/$SEARCH/$REPLACE/g" "$FILE" 2>/dev/null | grep -n "$REPLACE" | head -10
+echo ""
+echo "━━━ Press Enter to apply, Ctrl-F to cancel ━━━"
+SCRIPT
+chmod +x "$REPLACE_PREVIEW"
+
+# Create replace execution script
+REPLACE_EXEC=$(mktemp)
+cat >"$REPLACE_EXEC" <<'SCRIPT'
+#!/bin/bash
+SEARCH=$(cat /tmp/fzf-search-q 2>/dev/null)
+REPLACE="$1"
+shift
 FILES=("$@")
 
 if [[ -z "$SEARCH" || -z "$REPLACE" ]]; then
-    echo "Usage: search and replace requires both patterns"
+    echo "Error: Missing search or replace pattern"
     exit 1
 fi
 
+if [[ ${#FILES[@]} -eq 0 ]]; then
+    echo "Error: No files selected"
+    exit 1
+fi
+
+echo "Replacing '$SEARCH' → '$REPLACE'"
+echo ""
+
 for file in "${FILES[@]}"; do
-    if [[ "$MODE" == "prompt" ]]; then
-        echo "=== $file ==="
-        grep -n "$SEARCH" "$file" 2>/dev/null | head -5
-        echo ""
-        read -p "Replace in this file? [y/N] " confirm
-        if [[ "$confirm" =~ ^[Yy]$ ]]; then
-            sed -i.bak "s/$SEARCH/$REPLACE/g" "$file"
-            echo "✓ Replaced"
-        else
-            echo "✗ Skipped"
+    # Extract just the filename (first field before :)
+    filepath=$(echo "$file" | cut -d: -f1)
+    if [[ -f "$filepath" ]]; then
+        count=$(grep -c "$SEARCH" "$filepath" 2>/dev/null || echo "0")
+        if [[ "$count" -gt 0 ]]; then
+            sed -i.bak "s/$SEARCH/$REPLACE/g" "$filepath"
+            echo "✓ $filepath ($count replacements)"
         fi
-    else
-        sed -i.bak "s/$SEARCH/$REPLACE/g" "$file"
-        echo "✓ $file"
     fi
 done
+
+echo ""
+echo "Done! Backup files created with .bak extension"
+read -p "Press enter to continue..."
 SCRIPT
-chmod +x "$REPLACE_SCRIPT"
+chmod +x "$REPLACE_EXEC"
 
 # Cleanup
 cleanup() {
-    rm -f "$SEARCH_SCRIPT" "$REPLACE_SCRIPT"
-    rm -f /tmp/fzf-content-q /tmp/fzf-file-q /tmp/fzf-case /tmp/fzf-invert
+    rm -f "$SEARCH_SCRIPT" "$REPLACE_PREVIEW" "$REPLACE_EXEC"
+    rm -f /tmp/fzf-content-q /tmp/fzf-file-q /tmp/fzf-case /tmp/fzf-invert /tmp/fzf-search-q
 }
 trap cleanup EXIT
 
 # Initialize state files
 echo "--smart-case" > /tmp/fzf-case
-rm -f /tmp/fzf-content-q /tmp/fzf-file-q /tmp/fzf-invert
+rm -f /tmp/fzf-content-q /tmp/fzf-file-q /tmp/fzf-invert /tmp/fzf-search-q
 
 # Build initial command
 INITIAL_CMD="$RG_BASE --smart-case $TYPES_STR '' $PATHS_STR"
-
-# Replace mode
-if [[ -n "$REPLACE_MODE" ]]; then
-    echo "Search & Replace Mode"
-    echo "===================="
-    read -p "Search pattern: " SEARCH_PATTERN
-    read -p "Replace with: " REPLACE_PATTERN
-    
-    FILES=$(rg --pcre2 --hidden --files-with-matches $TYPES_STR "$SEARCH_PATTERN" $PATHS_STR 2>/dev/null)
-    
-    if [[ -z "$FILES" ]]; then
-        echo "No matches found."
-        exit 0
-    fi
-    
-    echo ""
-    echo "Matching files:"
-    echo "$FILES"
-    echo ""
-    
-    if [[ "$REPLACE_MODE" == "prompt" ]]; then
-        $REPLACE_SCRIPT "$SEARCH_PATTERN" "$REPLACE_PATTERN" "prompt" $FILES
-    else
-        read -p "Replace in all files? [y/N] " confirm
-        if [[ "$confirm" =~ ^[Yy]$ ]]; then
-            $REPLACE_SCRIPT "$SEARCH_PATTERN" "$REPLACE_PATTERN" "no-prompt" $FILES
-            echo "Done!"
-        else
-            echo "Cancelled."
-        fi
-    fi
-    exit 0
-fi
 
 # Normal search mode
 fzf \
@@ -188,15 +186,26 @@ fzf \
   --delimiter ':' \
   --nth 1 \
   --prompt 'Content [smart-case]> ' \
-  --header 'C-f:mode | C-i:case | C-v:invert | C-p:preview | C-d/C-u:scroll' \
+  --header 'C-f:mode | C-r:replace | C-i:case | C-v:invert | C-p:preview | C-d/C-u:scroll' \
   --bind "start:reload:$INITIAL_CMD" \
   --bind "change:reload:sleep 0.1; $SEARCH_SCRIPT {q}" \
   --bind 'ctrl-f:transform:
     if [[ $FZF_PROMPT =~ Content ]]; then
       echo "execute-silent(echo {q} > /tmp/fzf-content-q)+change-prompt(Filename> )+enable-search+unbind(change)+transform-query(cat /tmp/fzf-file-q 2>/dev/null || echo)"
-    else
+    elif [[ $FZF_PROMPT =~ Filename ]]; then
       CASE_LABEL=$(cat /tmp/fzf-case 2>/dev/null | sed "s/--//;s/-/ /")
       echo "execute-silent(echo {q} > /tmp/fzf-file-q)+change-prompt(Content [$CASE_LABEL]> )+disable-search+rebind(change)+reload('"$SEARCH_SCRIPT"' \"\$(cat /tmp/fzf-content-q 2>/dev/null)\")+transform-query(cat /tmp/fzf-content-q 2>/dev/null || echo)"
+    else
+      CASE_LABEL=$(cat /tmp/fzf-case 2>/dev/null | sed "s/--//;s/-/ /")
+      echo "change-prompt(Content [$CASE_LABEL]> )+change-preview(bat --color=always --highlight-line {2} {1} 2>/dev/null || cat {1})+transform-query(cat /tmp/fzf-content-q 2>/dev/null || echo)"
+    fi
+  ' \
+  --bind 'ctrl-r:transform:
+    if [[ $FZF_PROMPT =~ Replace ]]; then
+      CASE_LABEL=$(cat /tmp/fzf-case 2>/dev/null | sed "s/--//;s/-/ /")
+      echo "change-prompt(Content [$CASE_LABEL]> )+change-preview(bat --color=always --highlight-line {2} {1} 2>/dev/null || cat {1})+transform-query(cat /tmp/fzf-content-q 2>/dev/null || echo)"
+    else
+      echo "execute-silent(echo {q} > /tmp/fzf-search-q)+execute-silent(echo {q} > /tmp/fzf-content-q)+change-prompt(Replace> )+change-preview('"$REPLACE_PREVIEW"' {1} {2} {q})+transform-query(echo)"
     fi
   ' \
   --bind 'ctrl-i:transform:
@@ -224,6 +233,12 @@ fzf \
   --bind "ctrl-p:toggle-preview" \
   --bind "ctrl-d:preview-half-page-down" \
   --bind "ctrl-u:preview-half-page-up" \
-  --bind "enter:execute:${EDITOR:-vim} {1} +{2}" \
+  --bind 'enter:transform:
+    if [[ $FZF_PROMPT =~ Replace ]]; then
+      echo "execute('"$REPLACE_EXEC"' {q} {+})"
+    else
+      echo "execute(${EDITOR:-vim} {1} +{2})"
+    fi
+  ' \
   --preview 'bat --color=always --highlight-line {2} {1} 2>/dev/null || cat {1}' \
   --preview-window 'up,60%,border-bottom,+{2}+3/3,~3'
