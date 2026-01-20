@@ -48,8 +48,6 @@ rg-fzf [options] [paths...]
 | Option | Description |
 |--------|-------------|
 | `-t, --type TYPE` | Filter by file type (js, py, ts, etc.). Can be used multiple times. |
-| `-r, --replace` | Search & replace mode with per-file prompts (WIP) |
-| `-R, --replace-no-prompt` | Search & replace without per-file prompts (WIP)|
 | `-h, --help` | Show help |
 
 ### Keybindings
@@ -94,22 +92,6 @@ rg-fzf -t js -t ts
 
 # Search Python files in src/
 rg-fzf -t py src/
-```
-
-### Search & Replace
-
-```bash
-# Interactive replace (prompts for each file)
-rg-fzf -r
-
-# Replace with single confirmation
-rg-fzf -R
-
-# Replace in specific directory
-rg-fzf -r src/
-
-# Replace only in TypeScript files
-rg-fzf -r -t ts
 ```
 
 ## File Type Reference
