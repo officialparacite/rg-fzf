@@ -63,7 +63,6 @@ rg-fzf [options] [paths...]
 | `Ctrl-D` | Scroll preview down |
 | `Ctrl-U` | Scroll preview up |
 | `Enter` | Open selected file in editor at matching line |
-| `Tab` | Select multiple files |
 | `Esc` | Exit |
 
 ## Examples
