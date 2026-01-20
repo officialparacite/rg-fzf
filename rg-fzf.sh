@@ -11,7 +11,7 @@ Options:
 
 Keybindings:
   Ctrl-F    Toggle content/filename mode
-  Ctrl-R    Enter replace mode
+  Ctrl-R    Enter replace mode (only from content mode)
   Ctrl-I    Toggle case sensitivity
   Ctrl-V    Toggle invert match
   Ctrl-P    Toggle preview
@@ -65,6 +65,11 @@ fi
 # Base rg command (hidden files included by default)
 RG_BASE="rg --pcre2 --column --line-number --no-heading --color=always --hidden"
 
+# Headers for different modes
+HEADER_CONTENT='C-f:filename | C-r:replace | C-i:case | C-v:invert | C-p:preview | C-d/C-u:scroll'
+HEADER_FILENAME='C-f:content | C-i:case | C-v:invert | C-p:preview | C-d/C-u:scroll'
+HEADER_REPLACE='C-f:cancel | C-r:cancel | Enter:apply | C-p:preview | C-d/C-u:scroll'
+
 # Create helper script for content search
 SEARCH_SCRIPT=$(mktemp)
 cat >"$SEARCH_SCRIPT" <<SCRIPT
@@ -114,7 +119,6 @@ echo ""
 if [[ -n "$REPLACE" ]]; then
     echo "=== After replacement ==="
     echo ""
-    # Show the file with replacements applied, use bat for highlighting
     sed "s/$SEARCH/$REPLACE/g" "$FILE" 2>/dev/null | bat --color=always --language="${FILE##*.}" --style=numbers 2>/dev/null || sed "s/$SEARCH/$REPLACE/g" "$FILE"
 else
     echo "=== Current file ==="
@@ -190,7 +194,7 @@ fzf \
   --delimiter ':' \
   --nth 1 \
   --prompt 'Content [smart-case]> ' \
-  --header 'C-f:mode | C-r:replace | C-i:case | C-v:invert | C-p:preview | C-d/C-u:scroll' \
+  --header "$HEADER_CONTENT" \
   --bind "start:reload:$INITIAL_CMD" \
   --bind 'change:transform:
     if [[ $FZF_PROMPT =~ Replace ]]; then
@@ -203,21 +207,23 @@ fzf \
   ' \
   --bind 'ctrl-f:transform:
     if [[ $FZF_PROMPT =~ Content ]]; then
-      echo "execute-silent(echo {q} > /tmp/fzf-content-q)+change-prompt(Filename> )+enable-search+transform-query(cat /tmp/fzf-file-q 2>/dev/null || echo)"
+      echo "execute-silent(echo {q} > /tmp/fzf-content-q)+change-prompt(Filename> )+change-header('"$HEADER_FILENAME"')+enable-search+transform-query(cat /tmp/fzf-file-q 2>/dev/null || echo)"
     elif [[ $FZF_PROMPT =~ Filename ]]; then
       CASE_LABEL=$(cat /tmp/fzf-case 2>/dev/null | sed "s/--//;s/-/ /")
-      echo "execute-silent(echo {q} > /tmp/fzf-file-q)+change-prompt(Content [$CASE_LABEL]> )+disable-search+reload('"$SEARCH_SCRIPT"' \"\$(cat /tmp/fzf-content-q 2>/dev/null)\")+transform-query(cat /tmp/fzf-content-q 2>/dev/null || echo)"
+      echo "execute-silent(echo {q} > /tmp/fzf-file-q)+change-prompt(Content [$CASE_LABEL]> )+change-header('"$HEADER_CONTENT"')+disable-search+reload('"$SEARCH_SCRIPT"' \"\$(cat /tmp/fzf-content-q 2>/dev/null)\")+transform-query(cat /tmp/fzf-content-q 2>/dev/null || echo)"
     else
       CASE_LABEL=$(cat /tmp/fzf-case 2>/dev/null | sed "s/--//;s/-/ /")
-      echo "execute-silent(echo {q} > /tmp/fzf-replace-q)+change-prompt(Content [$CASE_LABEL]> )+change-preview(bat --color=always --highlight-line {2} {1} 2>/dev/null || cat {1})+transform-query(cat /tmp/fzf-content-q 2>/dev/null || echo)"
+      echo "execute-silent(echo {q} > /tmp/fzf-replace-q)+change-prompt(Content [$CASE_LABEL]> )+change-header('"$HEADER_CONTENT"')+change-preview(bat --color=always --highlight-line {2} {1} 2>/dev/null || cat {1})+transform-query(cat /tmp/fzf-content-q 2>/dev/null || echo)"
     fi
   ' \
   --bind 'ctrl-r:transform:
     if [[ $FZF_PROMPT =~ Replace ]]; then
       CASE_LABEL=$(cat /tmp/fzf-case 2>/dev/null | sed "s/--//;s/-/ /")
-      echo "execute-silent(echo {q} > /tmp/fzf-replace-q)+change-prompt(Content [$CASE_LABEL]> )+change-preview(bat --color=always --highlight-line {2} {1} 2>/dev/null || cat {1})+transform-query(cat /tmp/fzf-content-q 2>/dev/null || echo)"
+      echo "execute-silent(echo {q} > /tmp/fzf-replace-q)+change-prompt(Content [$CASE_LABEL]> )+change-header('"$HEADER_CONTENT"')+change-preview(bat --color=always --highlight-line {2} {1} 2>/dev/null || cat {1})+transform-query(cat /tmp/fzf-content-q 2>/dev/null || echo)"
+    elif [[ $FZF_PROMPT =~ Filename ]]; then
+      echo "first"
     else
-      echo "execute-silent(echo {q} > /tmp/fzf-search-q)+execute-silent(echo {q} > /tmp/fzf-content-q)+change-prompt(Replace> )+preview('"$REPLACE_PREVIEW"' {1} {2} {q})+transform-query(cat /tmp/fzf-replace-q 2>/dev/null || echo)"
+      echo "execute-silent(echo {q} > /tmp/fzf-search-q)+execute-silent(echo {q} > /tmp/fzf-content-q)+change-prompt(Replace> )+change-header('"$HEADER_REPLACE"')+preview('"$REPLACE_PREVIEW"' {1} {2} {q})+transform-query(cat /tmp/fzf-replace-q 2>/dev/null || echo)"
     fi
   ' \
   --bind 'ctrl-i:transform:
