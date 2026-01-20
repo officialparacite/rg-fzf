@@ -28,7 +28,7 @@ A powerful interactive search tool combining [ripgrep](https://github.com/BurntS
 
 ```bash
 # Clone the repository
-git clone https://github.com/yourusername/rg-fzf.git
+git clone https://github.com/officialparacite/rg-fzf.git
 
 # Make executable
 chmod +x rg-fzf/rg-fzf.sh
