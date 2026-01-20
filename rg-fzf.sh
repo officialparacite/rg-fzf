@@ -17,7 +17,6 @@ Keybindings:
   Ctrl-P    Toggle preview
   Ctrl-D    Scroll preview down
   Ctrl-U    Scroll preview up
-  Tab       Select multiple files
   Enter     Open in editor (content/filename mode) or apply replace (replace mode)
   Esc       Exit
 
@@ -95,32 +94,33 @@ cat >"$REPLACE_PREVIEW" <<'SCRIPT'
 #!/bin/bash
 FILE="$1"
 LINE="$2"
-SEARCH=$(cat /tmp/fzf-search-q 2>/dev/null)
 REPLACE="$3"
+SEARCH=$(cat /tmp/fzf-search-q 2>/dev/null)
+
+if [[ -z "$FILE" || ! -f "$FILE" ]]; then
+    echo "Select a file to preview replacement"
+    exit 0
+fi
 
 if [[ -z "$SEARCH" ]]; then
-    bat --color=always --highlight-line "$LINE" "$FILE" 2>/dev/null || cat "$FILE"
+    echo "No search pattern"
     exit 0
 fi
 
-if [[ -z "$REPLACE" ]]; then
-    echo "Type replacement string..."
+echo "Search:  $SEARCH"
+echo "Replace: ${REPLACE:-<type replacement above>}"
+echo ""
+
+if [[ -n "$REPLACE" ]]; then
+    echo "=== After replacement ==="
+    echo ""
+    # Show the file with replacements applied, use bat for highlighting
+    sed "s/$SEARCH/$REPLACE/g" "$FILE" 2>/dev/null | bat --color=always --language="${FILE##*.}" --style=numbers 2>/dev/null || sed "s/$SEARCH/$REPLACE/g" "$FILE"
+else
+    echo "=== Current file ==="
     echo ""
     bat --color=always --highlight-line "$LINE" "$FILE" 2>/dev/null || cat "$FILE"
-    exit 0
 fi
-
-echo "━━━ Preview: Replace '$SEARCH' → '$REPLACE' ━━━"
-echo ""
-echo "Before:"
-echo "-------"
-grep -n "$SEARCH" "$FILE" 2>/dev/null | head -10
-echo ""
-echo "After:"
-echo "------"
-sed "s/$SEARCH/$REPLACE/g" "$FILE" 2>/dev/null | grep -n "$REPLACE" | head -10
-echo ""
-echo "━━━ Press Enter to apply, Ctrl-F to cancel ━━━"
 SCRIPT
 chmod +x "$REPLACE_PREVIEW"
 
@@ -135,31 +135,35 @@ FILES=("$@")
 
 if [[ -z "$SEARCH" || -z "$REPLACE" ]]; then
     echo "Error: Missing search or replace pattern"
+    read -p "Press enter to continue..."
     exit 1
 fi
 
 if [[ ${#FILES[@]} -eq 0 ]]; then
     echo "Error: No files selected"
+    read -p "Press enter to continue..."
     exit 1
 fi
 
-echo "Replacing '$SEARCH' → '$REPLACE'"
+echo "Replacing '$SEARCH' -> '$REPLACE'"
 echo ""
 
+count_total=0
 for file in "${FILES[@]}"; do
-    # Extract just the filename (first field before :)
     filepath=$(echo "$file" | cut -d: -f1)
     if [[ -f "$filepath" ]]; then
         count=$(grep -c "$SEARCH" "$filepath" 2>/dev/null || echo "0")
         if [[ "$count" -gt 0 ]]; then
             sed -i.bak "s/$SEARCH/$REPLACE/g" "$filepath"
-            echo "✓ $filepath ($count replacements)"
+            echo "[OK] $filepath ($count replacements)"
+            count_total=$((count_total + count))
         fi
     fi
 done
 
 echo ""
-echo "Done! Backup files created with .bak extension"
+echo "Done! $count_total total replacements"
+echo "Backup files created with .bak extension"
 read -p "Press enter to continue..."
 SCRIPT
 chmod +x "$REPLACE_EXEC"
@@ -167,13 +171,13 @@ chmod +x "$REPLACE_EXEC"
 # Cleanup
 cleanup() {
     rm -f "$SEARCH_SCRIPT" "$REPLACE_PREVIEW" "$REPLACE_EXEC"
-    rm -f /tmp/fzf-content-q /tmp/fzf-file-q /tmp/fzf-case /tmp/fzf-invert /tmp/fzf-search-q
+    rm -f /tmp/fzf-content-q /tmp/fzf-file-q /tmp/fzf-case /tmp/fzf-invert /tmp/fzf-search-q /tmp/fzf-replace-q
 }
 trap cleanup EXIT
 
 # Initialize state files
 echo "--smart-case" > /tmp/fzf-case
-rm -f /tmp/fzf-content-q /tmp/fzf-file-q /tmp/fzf-invert /tmp/fzf-search-q
+rm -f /tmp/fzf-content-q /tmp/fzf-file-q /tmp/fzf-invert /tmp/fzf-search-q /tmp/fzf-replace-q
 
 # Build initial command
 INITIAL_CMD="$RG_BASE --smart-case $TYPES_STR '' $PATHS_STR"
@@ -188,24 +192,32 @@ fzf \
   --prompt 'Content [smart-case]> ' \
   --header 'C-f:mode | C-r:replace | C-i:case | C-v:invert | C-p:preview | C-d/C-u:scroll' \
   --bind "start:reload:$INITIAL_CMD" \
-  --bind "change:reload:sleep 0.1; $SEARCH_SCRIPT {q}" \
+  --bind 'change:transform:
+    if [[ $FZF_PROMPT =~ Replace ]]; then
+      echo "preview('"$REPLACE_PREVIEW"' {1} {2} {q})"
+    elif [[ $FZF_PROMPT =~ Filename ]]; then
+      echo "first"
+    else
+      echo "reload:sleep 0.1; '"$SEARCH_SCRIPT"' {q}"
+    fi
+  ' \
   --bind 'ctrl-f:transform:
     if [[ $FZF_PROMPT =~ Content ]]; then
-      echo "execute-silent(echo {q} > /tmp/fzf-content-q)+change-prompt(Filename> )+enable-search+unbind(change)+transform-query(cat /tmp/fzf-file-q 2>/dev/null || echo)"
+      echo "execute-silent(echo {q} > /tmp/fzf-content-q)+change-prompt(Filename> )+enable-search+transform-query(cat /tmp/fzf-file-q 2>/dev/null || echo)"
     elif [[ $FZF_PROMPT =~ Filename ]]; then
       CASE_LABEL=$(cat /tmp/fzf-case 2>/dev/null | sed "s/--//;s/-/ /")
-      echo "execute-silent(echo {q} > /tmp/fzf-file-q)+change-prompt(Content [$CASE_LABEL]> )+disable-search+rebind(change)+reload('"$SEARCH_SCRIPT"' \"\$(cat /tmp/fzf-content-q 2>/dev/null)\")+transform-query(cat /tmp/fzf-content-q 2>/dev/null || echo)"
+      echo "execute-silent(echo {q} > /tmp/fzf-file-q)+change-prompt(Content [$CASE_LABEL]> )+disable-search+reload('"$SEARCH_SCRIPT"' \"\$(cat /tmp/fzf-content-q 2>/dev/null)\")+transform-query(cat /tmp/fzf-content-q 2>/dev/null || echo)"
     else
       CASE_LABEL=$(cat /tmp/fzf-case 2>/dev/null | sed "s/--//;s/-/ /")
-      echo "change-prompt(Content [$CASE_LABEL]> )+change-preview(bat --color=always --highlight-line {2} {1} 2>/dev/null || cat {1})+transform-query(cat /tmp/fzf-content-q 2>/dev/null || echo)"
+      echo "execute-silent(echo {q} > /tmp/fzf-replace-q)+change-prompt(Content [$CASE_LABEL]> )+change-preview(bat --color=always --highlight-line {2} {1} 2>/dev/null || cat {1})+transform-query(cat /tmp/fzf-content-q 2>/dev/null || echo)"
     fi
   ' \
   --bind 'ctrl-r:transform:
     if [[ $FZF_PROMPT =~ Replace ]]; then
       CASE_LABEL=$(cat /tmp/fzf-case 2>/dev/null | sed "s/--//;s/-/ /")
-      echo "change-prompt(Content [$CASE_LABEL]> )+change-preview(bat --color=always --highlight-line {2} {1} 2>/dev/null || cat {1})+transform-query(cat /tmp/fzf-content-q 2>/dev/null || echo)"
+      echo "execute-silent(echo {q} > /tmp/fzf-replace-q)+change-prompt(Content [$CASE_LABEL]> )+change-preview(bat --color=always --highlight-line {2} {1} 2>/dev/null || cat {1})+transform-query(cat /tmp/fzf-content-q 2>/dev/null || echo)"
     else
-      echo "execute-silent(echo {q} > /tmp/fzf-search-q)+execute-silent(echo {q} > /tmp/fzf-content-q)+change-prompt(Replace> )+change-preview('"$REPLACE_PREVIEW"' {1} {2} {q})+transform-query(echo)"
+      echo "execute-silent(echo {q} > /tmp/fzf-search-q)+execute-silent(echo {q} > /tmp/fzf-content-q)+change-prompt(Replace> )+preview('"$REPLACE_PREVIEW"' {1} {2} {q})+transform-query(cat /tmp/fzf-replace-q 2>/dev/null || echo)"
     fi
   ' \
   --bind 'ctrl-i:transform:
