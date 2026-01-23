@@ -68,8 +68,8 @@ if [[ ${#TYPES[@]} -gt 0 ]]; then
     TYPES_STR="${TYPES[*]}"
 fi
 
-# Base rg command (--with-filename ensures filename is always shown, even for single files)
-RG_BASE="rg --pcre2 --column --line-number --no-heading --color=always --with-filename"
+# Base rg command (without hidden/follow - those are now toggleable)
+RG_BASE="rg --pcre2 --column --line-number --no-heading --color=always"
 
 # Headers for different modes
 HEADER_CONTENT='C-f:filename | C-r:replace | M-c:case | M-v:invert | M-s:symlinks | M-h:hidden | Tab:select'
