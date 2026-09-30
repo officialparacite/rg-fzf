@@ -14,6 +14,7 @@ Keybindings:
   Ctrl-F      Toggle content/filename mode
   Alt-V       Toggle invert match
   Alt-H       Toggle hidden files
+  Alt-P       Toggle PCRE2 (lookarounds, backreferences)
   Tab         Toggle selection and move to the next line
   Shift-Tab   Toggle selection and move to the previous line
   Ctrl-A      Select all
@@ -25,7 +26,9 @@ Keybindings:
   Ctrl-U      Scroll preview up
   Esc         Exit
 
-Prompt flags: [H] hidden files on, [V] invert match on
+Prompt: "Content (regex)" uses ripgrep's default regex engine, "Content (pcre2)" uses
+PCRE2 (Alt-P), and "Filename (fuzzy)" fuzzy-matches filenames.
+Flags: [H] hidden files on, [V] invert match on, [P] PCRE2 on (shown in filename mode)
 
 Examples:
   rg-fzf                        # Search current directory
@@ -79,12 +82,12 @@ for p in "${PATHS[@]}"; do
     [[ -e $p ]] || die "no such file or directory: $p"
 done
 
-HEADER_CONTENT='C-f:filename | C-e:edit | M-v:invert | M-h:hidden | Tab:select | M-enter:json'
-HEADER_FILENAME='C-f:content | C-e:edit | M-v:invert | M-h:hidden | Tab:select | M-enter:json'
+HEADER_CONTENT='C-f:filename | C-e:edit | M-v:invert | M-h:hidden | M-p:pcre2 | Tab:select | M-enter:json'
+HEADER_FILENAME='C-f:content | C-e:edit | M-v:invert | M-h:hidden | M-p:pcre2 | Tab:select | M-enter:json'
 
 # Private directory for the helper scripts and state, removed on exit.
 # State files: content-q and file-q hold the saved query of each mode;
-# invert and hidden exist while that toggle is on.
+# invert, hidden and pcre2 exist while that toggle is on.
 STATE=$(mktemp -d)
 SEARCH="$STATE/search.sh"
 ACTIONS="$STATE/actions.sh"
@@ -144,9 +147,11 @@ if [[ -z $Q ]]; then
 fi
 rm -f "$S/listing"
 
-# --engine auto: fast default regex engine, PCRE2 only when the pattern needs it
+# --engine: ripgrep's default regex engine, or PCRE2 while Alt-P is on
 # --max-columns: shorten huge lines in the list (they are still searched in full)
-RG=(rg --engine auto --ignore-case --column --line-number --no-heading --color=always
+ENGINE=default
+[[ -f $S/pcre2 ]] && ENGINE=pcre2
+RG=(rg --engine "$ENGINE" --ignore-case --column --line-number --no-heading --color=always
     --with-filename --field-match-separator '\x00:' --max-columns 500 --max-columns-preview
     "${HIDDEN[@]}" "${TYPES[@]}")
 [[ -f $S/invert ]] && RG+=(--invert-match)
@@ -168,12 +173,19 @@ SCRIPT
     printf 'HEADER_CONTENT=%q\n' "$HEADER_CONTENT"
     printf 'HEADER_FILENAME=%q\n' "$HEADER_FILENAME"
     cat << 'SCRIPT'
+# Prompt: mode, how the typed text is matched, then active toggles.
+# Filename mode is always fuzzy, so PCRE2 being on shows as a [P] flag there.
 prompt() {
-    local flags=""
+    local how=regex flags=""
+    [[ -f $S/pcre2 ]] && how=pcre2
     [[ -f $S/hidden ]] && flags+="H"
     [[ -f $S/invert ]] && flags+="V"
+    if [[ $1 == Filename ]]; then
+        [[ $how == pcre2 ]] && flags+="P"
+        how=fuzzy
+    fi
     [[ -n $flags ]] && flags=" [$flags]"
-    echo "$1$flags> "
+    echo "$1 ($how)$flags> "
 }
 
 if [[ $FZF_PROMPT == Filename* ]]; then MODE=Filename; else MODE=Content; fi
@@ -188,7 +200,7 @@ case $1 in
             echo "reload(sleep 0.1; '$SEARCH' {q})"
         fi
         ;;
-    toggle-invert|toggle-hidden)
+    toggle-invert|toggle-hidden|toggle-pcre2)
         f="$S/${1#toggle-}"
         if [[ -f $f ]]; then rm -f "$f"; else touch "$f"; fi
         if [[ $MODE == Filename ]]; then
@@ -242,8 +254,10 @@ print_selection() {
         return
     fi
     if [[ ! -f $STATE/invert ]]; then
+        local engine=default
+        [[ -f $STATE/pcre2 ]] && engine=pcre2
         jq -Rnj '[inputs | split("\u0000:")[0]] | unique[] | . + "\u0000"' < "$selection" |
-            xargs -0 -r rg --json --engine auto --ignore-case -e "$query" -- > "$matches" 2>/dev/null
+            xargs -0 -r rg --json --engine "$engine" --ignore-case -e "$query" -- > "$matches" 2>/dev/null
     fi
     # Invert-match lines have no column (FILE, LINE, TEXT) and no matches
     jq -n --arg q "$query" --rawfile sel "$selection" --slurpfile rg "$matches" '
@@ -270,13 +284,14 @@ fzf \
   --nth 1 \
   --expect alt-enter \
   --print-query \
-  --prompt 'Content> ' \
+  --prompt 'Content (regex)> ' \
   --header "$HEADER_CONTENT" \
   --bind "start:reload:'$SEARCH' ''" \
   --bind "change:transform:'$ACTIONS' query-changed" \
   --bind "ctrl-f:transform:'$ACTIONS' switch-mode" \
   --bind "alt-v:transform:'$ACTIONS' toggle-invert" \
   --bind "alt-h:transform:'$ACTIONS' toggle-hidden" \
+  --bind "alt-p:transform:'$ACTIONS' toggle-pcre2" \
   --bind "tab:toggle+up" \
   --bind "shift-tab:toggle+down" \
   --bind "ctrl-a:select-all" \

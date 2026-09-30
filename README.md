@@ -5,7 +5,7 @@ Interactive code search in the terminal. Type a pattern, and [ripgrep](https://g
 ## Features
 
 - Live search as you type, case-insensitive
-- Regex support, including lookarounds and backreferences (PCRE2) when a pattern needs them
+- Regex search, with a PCRE2 toggle (`Alt-P`) for lookarounds and backreferences
 - Preview of each match in context, with syntax highlighting via [bat](https://github.com/sharkdp/bat)
 - Filename mode to narrow the current results down to matching files
 - Toggles for invert match and hidden files
@@ -17,7 +17,7 @@ Interactive code search in the terminal. Type a pattern, and [ripgrep](https://g
 
 | Tool | Notes | macOS | Debian/Ubuntu |
 |------|-------|-------|---------------|
-| ripgrep | Needs PCRE2 support for lookaround/backreference patterns (Homebrew builds include it) | `brew install ripgrep` | `apt install ripgrep` |
+| ripgrep | Needs PCRE2 support for `Alt-P` (Homebrew builds include it) | `brew install ripgrep` | `apt install ripgrep` |
 | fzf | 0.45 or newer | `brew install fzf` | `apt install fzf` |
 | bat | Optional; preview falls back to plain text without it | `brew install bat` | `apt install bat` |
 | jq | Only for JSON output (`Alt-Enter`); included with macOS 15+ | `brew install jq` | `apt install jq` |
@@ -64,6 +64,7 @@ rg-fzf app.ts utils.ts      # search specific files
 | `Ctrl-F` | Switch between content search and filename mode |
 | `Alt-V` | Toggle invert match (show lines that don't match) |
 | `Alt-H` | Toggle searching hidden files (off by default) |
+| `Alt-P` | Toggle PCRE2, for lookarounds and backreferences (off by default) |
 | `Tab` / `Shift-Tab` | Toggle selection of a line and move to the next / previous line |
 | `Ctrl-A` / `Ctrl-Z` | Select all / deselect all |
 | `Enter` | Print the selected lines (or the current line) and exit |
@@ -72,12 +73,12 @@ rg-fzf app.ts utils.ts      # search specific files
 | `Ctrl-D` / `Ctrl-U` | Scroll the preview down / up |
 | `Esc` | Exit |
 
-The prompt shows active toggles: `[H]` for hidden files, `[V]` for invert match.
+The prompt shows how your text is matched: `Content (regex)`, `Content (pcre2)` while PCRE2 is on, or `Filename (fuzzy)`. Active toggles appear after it: `[H]` for hidden files, `[V]` for invert match, and `[P]` in filename mode while PCRE2 is on.
 
 ## How it works
 
 - **Empty search box:** shows a list of files rather than every line of every file, which keeps startup fast in large directories.
-- **Content mode:** each keystroke re-runs ripgrep with your pattern. ripgrep uses its fast default regex engine and switches to PCRE2 only when the pattern requires it.
+- **Content mode:** each keystroke re-runs ripgrep with your pattern. By default ripgrep uses its fast regex engine, which doesn't support lookarounds (`(?=...)`, `(?<=...)`) or backreferences (`\1`); a pattern using them shows no results. Press `Alt-P` to switch to PCRE2 for those. PCRE2 is slower on large searches, and patterns with heavy backtracking such as `(a+)+$` can make ripgrep skip files.
 - **Filename mode (`Ctrl-F`):** fuzzy-filters the current results by filename. When you switch back to content mode, the same filename filter stays applied, so you keep exactly the files you narrowed down to. Entering filename mode again reloads every match for your search, with your previous filename text filled in, so you can change which files you picked.
 
 Printed lines (`Enter`) have the form `file:line:column:text`. `Alt-Enter` prints the same selection as JSON, with the search pattern and the text each line matched:
