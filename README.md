@@ -9,7 +9,7 @@ Interactive code search in the terminal. Type a pattern, and [ripgrep](https://g
 - Preview of each match in context, with syntax highlighting via [bat](https://github.com/sharkdp/bat)
 - Filename mode to narrow the current results down to matching files
 - Toggles for invert match and hidden files
-- Multi-select lines and print them on exit
+- Multi-select lines and print them on exit, as plain text or JSON
 - File-type filtering with `-t`
 - Opens the match in `$EDITOR` at the right line
 
@@ -20,6 +20,7 @@ Interactive code search in the terminal. Type a pattern, and [ripgrep](https://g
 | ripgrep | Needs PCRE2 support for lookaround/backreference patterns (Homebrew builds include it) | `brew install ripgrep` | `apt install ripgrep` |
 | fzf | 0.45 or newer | `brew install fzf` | `apt install fzf` |
 | bat | Optional; preview falls back to plain text without it | `brew install bat` | `apt install bat` |
+| jq | Only for JSON output (`Alt-Enter`); included with macOS 15+ | `brew install jq` | `apt install jq` |
 
 Check PCRE2 support with `rg --version` (look for `+pcre2`).
 
@@ -66,6 +67,7 @@ rg-fzf app.ts utils.ts      # search specific files
 | `Tab` / `Shift-Tab` | Toggle selection of a line and move to the next / previous line |
 | `Ctrl-A` / `Ctrl-Z` | Select all / deselect all |
 | `Enter` | Print the selected lines (or the current line) and exit |
+| `Alt-Enter` | Same, but print them as a JSON array (needs `jq`) |
 | `Ctrl-P` | Toggle the preview window |
 | `Ctrl-D` / `Ctrl-U` | Scroll the preview down / up |
 | `Esc` | Exit |
@@ -78,7 +80,17 @@ The prompt shows active toggles: `[H]` for hidden files, `[V]` for invert match.
 - **Content mode:** each keystroke re-runs ripgrep with your pattern. ripgrep uses its fast default regex engine and switches to PCRE2 only when the pattern requires it.
 - **Filename mode (`Ctrl-F`):** fuzzy-filters the current results by filename. When you switch back to content mode, the same filename filter stays applied, so you keep exactly the files you narrowed down to. Entering filename mode again reloads every match for your search, with your previous filename text filled in, so you can change which files you picked.
 
-Printed lines (`Enter`) have the form `file:line:column:text`.
+Printed lines (`Enter`) have the form `file:line:column:text`. `Alt-Enter` prints the same selection as JSON:
+
+```json
+[
+  { "file": "src/app.js", "line": 12, "column": 5, "text": "const initialLevel = 1;" }
+]
+```
+
+With invert match on, entries have no `column`. From the empty-search file list, entries are just `{ "file": ... }`.
+
+Internally the fields are separated by an invisible NUL character (filenames can't contain one), so filenames with `:` or digits in them are handled correctly by the preview, `Ctrl-E`, filename mode and JSON output.
 
 ## Limitations
 

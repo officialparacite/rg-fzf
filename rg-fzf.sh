@@ -19,6 +19,7 @@ Keybindings:
   Ctrl-A      Select all
   Ctrl-Z      Deselect all
   Enter       Print selected lines (or the current line) and exit
+  Alt-Enter   Same, as a JSON array (needs jq)
   Ctrl-P      Toggle preview
   Ctrl-D      Scroll preview down
   Ctrl-U      Scroll preview up
@@ -77,8 +78,8 @@ for p in "${PATHS[@]}"; do
     [[ -e $p ]] || die "no such file or directory: $p"
 done
 
-HEADER_CONTENT='C-f:filename | C-e:edit | M-v:invert | M-h:hidden | Tab:select'
-HEADER_FILENAME='C-f:content | C-e:edit | M-v:invert | M-h:hidden | Tab:select'
+HEADER_CONTENT='C-f:filename | C-e:edit | M-v:invert | M-h:hidden | Tab:select | M-enter:json'
+HEADER_FILENAME='C-f:content | C-e:edit | M-v:invert | M-h:hidden | Tab:select | M-enter:json'
 
 # Private directory for the helper scripts and state, removed on exit.
 # State files: content-q and file-q hold the saved query of each mode;
@@ -131,15 +132,22 @@ list_files() {
     fi
 }
 
+# Result lines are FILE, LINE, COLUMN and TEXT joined by NUL + ':'. The NUL is
+# invisible, so the line displays as file:line:column:text, but a filename can never
+# contain NUL, so splitting on it is exact even for names containing ':' and digits.
+# The "listing" state file marks when the list shows files (empty query) rather than matches.
 if [[ -z $Q ]]; then
-    list_files | tr '\0' '\n' | sed 's/$/:1:1:/'
+    touch "$S/listing"
+    list_files | xargs -0 -r printf '%s\0:1\0:1\0:\n'
     exit
 fi
+rm -f "$S/listing"
 
 # --engine auto: fast default regex engine, PCRE2 only when the pattern needs it
 # --max-columns: shorten huge lines in the list (they are still searched in full)
 RG=(rg --engine auto --ignore-case --column --line-number --no-heading --color=always
-    --with-filename --max-columns 500 --max-columns-preview "${HIDDEN[@]}" "${TYPES[@]}")
+    --with-filename --field-match-separator '\x00:' --max-columns 500 --max-columns-preview
+    "${HIDDEN[@]}" "${TYPES[@]}")
 [[ -f $S/invert ]] && RG+=(--invert-match)
 
 if [[ -n $FILE_Q ]]; then
@@ -194,12 +202,34 @@ SCRIPT
 
 chmod +x "$SEARCH" "$ACTIONS"
 
+# fzf prints the key that closed it (empty for Enter, "alt-enter" for Alt-Enter),
+# then the selected lines. Enter: plain file:line:column:text. Alt-Enter: JSON array.
+print_selection() {
+    local key
+    IFS= read -r key || return 0
+    if [[ $key != alt-enter ]]; then
+        tr -d '\0'
+    elif ! command -v jq > /dev/null; then
+        echo "rg-fzf: jq is needed for JSON output (brew install jq / apt install jq)" >&2
+        return 1
+    elif [[ -f $STATE/listing ]]; then
+        jq -Rn '[inputs | {file: split("\u0000:")[0]}]'
+    else
+        # Invert-match lines have no column: FILE, LINE, TEXT
+        jq -Rn '[inputs | split("\u0000:") |
+            if length == 3 then {file: .[0], line: (.[1] | tonumber), text: .[2]}
+            else {file: .[0], line: (.[1] | tonumber), column: (.[2] | tonumber),
+                  text: (.[3:] | join("\u0000:"))} end]'
+    fi
+}
+
 fzf \
   --ansi \
   --disabled \
   --multi \
-  --delimiter ':' \
+  --delimiter '\x00:' \
   --nth 1 \
+  --expect alt-enter \
   --prompt 'Content> ' \
   --header "$HEADER_CONTENT" \
   --bind "start:reload:'$SEARCH' ''" \
@@ -216,4 +246,4 @@ fzf \
   --bind "ctrl-u:preview-half-page-up" \
   --bind "ctrl-e:execute(${EDITOR:-vim} {1} +{2})" \
   --preview 'bat --color=always --highlight-line {2} -- {1} 2>/dev/null || cat -- {1}' \
-  --preview-window 'up,60%,border-bottom,+{2}+3/3,~3'
+  --preview-window 'up,60%,border-bottom,+{2}+3/3,~3' | print_selection
