@@ -19,7 +19,7 @@ Keybindings:
   Ctrl-A      Select all
   Ctrl-Z      Deselect all
   Enter       Print selected lines (or the current line) and exit
-  Alt-Enter   Same, as a JSON array (needs jq)
+  Alt-Enter   Same, as JSON with the query and matched text (needs jq)
   Ctrl-P      Toggle preview
   Ctrl-D      Scroll preview down
   Ctrl-U      Scroll preview up
@@ -51,7 +51,8 @@ while [[ $# -gt 0 ]]; do
     case $1 in
         -t|--type)
             [[ $# -ge 2 ]] || die "$1 needs a file type"
-            rg --type-list | grep -q "^$2:" || die "unknown file type '$2' (see rg --type-list)"
+            [[ $2 == all ]] || rg --type-list | cut -d: -f1 | grep -qxF -- "$2" ||
+                die "unknown file type '$2' (see rg --type-list)"
             TYPES+=(--type "$2")
             shift 2
             ;;
@@ -178,6 +179,15 @@ prompt() {
 if [[ $FZF_PROMPT == Filename* ]]; then MODE=Filename; else MODE=Content; fi
 
 case $1 in
+    query-changed)
+        # Filename mode: fzf filters live. Content mode: re-run the search.
+        # {q} is left for fzf to fill in (it quotes it), never expanded here.
+        if [[ $MODE == Filename ]]; then
+            echo "first"
+        else
+            echo "reload(sleep 0.1; '$SEARCH' {q})"
+        fi
+        ;;
     toggle-invert|toggle-hidden)
         f="$S/${1#toggle-}"
         if [[ -f $f ]]; then rm -f "$f"; else touch "$f"; fi
@@ -191,8 +201,10 @@ case $1 in
         ;;
     switch-mode)
         if [[ $MODE == Content ]]; then
+            touch "$S/filename-mode"
             echo "execute-silent(printf '%s' {q} > '$S/content-q')+change-prompt($(prompt Filename))+change-header($HEADER_FILENAME)+enable-search+reload('$SEARCH' --all-files --saved)+transform-query(cat '$S/file-q' 2>/dev/null)"
         else
+            rm -f "$S/filename-mode"
             echo "execute-silent(printf '%s' {q} > '$S/file-q')+change-prompt($(prompt Content))+change-header($HEADER_CONTENT)+disable-search+reload('$SEARCH' --saved)+transform-query(cat '$S/content-q' 2>/dev/null)"
         fi
         ;;
@@ -202,25 +214,52 @@ SCRIPT
 
 chmod +x "$SEARCH" "$ACTIONS"
 
-# fzf prints the key that closed it (empty for Enter, "alt-enter" for Alt-Enter),
-# then the selected lines. Enter: plain file:line:column:text. Alt-Enter: JSON array.
+# fzf prints the query, then the key that closed it (empty for Enter, "alt-enter" for
+# Alt-Enter), then the selected lines. Enter: plain file:line:column:text.
+# Alt-Enter: JSON {query, results}. Each result's full line and matched text come from
+# ripgrep's own JSON output (re-searching just the selected files), never from
+# parsing the displayed line.
 print_selection() {
-    local key
+    local query key selection="$STATE/selection" matches="$STATE/matches.json"
+    IFS= read -r query || return 0
     IFS= read -r key || return 0
     if [[ $key != alt-enter ]]; then
-        tr -d '\0'
-    elif ! command -v jq > /dev/null; then
+        # LC_ALL=C: treat text as raw bytes, so non-UTF-8 lines pass through intact
+        LC_ALL=C tr -d '\0'
+        return
+    fi
+    if ! command -v jq > /dev/null; then
         echo "rg-fzf: jq is needed for JSON output (brew install jq / apt install jq)" >&2
         return 1
-    elif [[ -f $STATE/listing ]]; then
-        jq -Rn '[inputs | {file: split("\u0000:")[0]}]'
-    else
-        # Invert-match lines have no column: FILE, LINE, TEXT
-        jq -Rn '[inputs | split("\u0000:") |
-            if length == 3 then {file: .[0], line: (.[1] | tonumber), text: .[2]}
-            else {file: .[0], line: (.[1] | tonumber), column: (.[2] | tonumber),
-                  text: (.[3:] | join("\u0000:"))} end]'
     fi
+    # In filename mode the query box holds filename text; use the saved search instead
+    [[ -f $STATE/filename-mode ]] && query=$(cat "$STATE/content-q" 2>/dev/null)
+
+    cat > "$selection"
+    : > "$matches"
+    if [[ -f $STATE/listing ]]; then
+        jq -Rn --arg q "$query" '{query: $q, results: [inputs | {file: split("\u0000:")[0]}]}' < "$selection"
+        return
+    fi
+    if [[ ! -f $STATE/invert ]]; then
+        jq -Rnj '[inputs | split("\u0000:")[0]] | unique[] | . + "\u0000"' < "$selection" |
+            xargs -0 -r rg --json --engine auto --ignore-case -e "$query" -- > "$matches" 2>/dev/null
+    fi
+    # Invert-match lines have no column (FILE, LINE, TEXT) and no matches
+    jq -n --arg q "$query" --rawfile sel "$selection" --slurpfile rg "$matches" '
+        ($rg | map(select(.type == "match") | .data
+               | {key: "\(.path.text)\u0000\(.line_number)",
+                  value: {text: (.lines.text // null | if . then rtrimstr("\n") | rtrimstr("\r") else . end),
+                          matches: [.submatches[].match.text // empty]}})
+             | from_entries) as $hits
+        | {query: $q, results: [
+            $sel | split("\n")[] | select(length > 0) | split("\u0000:")
+            | if length == 3 then {file: .[0], line: (.[1] | tonumber), text: .[2]}
+              else {file: .[0], line: (.[1] | tonumber), column: (.[2] | tonumber),
+                    text: (.[3:] | join("\u0000:"))}
+                   | $hits["\(.file)\u0000\(.line)"] as $h
+                   | .text = ($h.text // .text) | .matches = ($h.matches // [])
+              end]}'
 }
 
 fzf \
@@ -230,10 +269,11 @@ fzf \
   --delimiter '\x00:' \
   --nth 1 \
   --expect alt-enter \
+  --print-query \
   --prompt 'Content> ' \
   --header "$HEADER_CONTENT" \
   --bind "start:reload:'$SEARCH' ''" \
-  --bind "change:transform:[[ \$FZF_PROMPT == Filename* ]] && echo first || echo \"reload:sleep 0.1; '$SEARCH' {q}\"" \
+  --bind "change:transform:'$ACTIONS' query-changed" \
   --bind "ctrl-f:transform:'$ACTIONS' switch-mode" \
   --bind "alt-v:transform:'$ACTIONS' toggle-invert" \
   --bind "alt-h:transform:'$ACTIONS' toggle-hidden" \
