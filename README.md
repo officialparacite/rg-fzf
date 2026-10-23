@@ -71,6 +71,9 @@ rg-fzf app.ts utils.ts      # search specific files
 | `Alt-Enter` | Same, but print them as JSON with the query and matched text (needs `jq`) |
 | `Ctrl-P` | Toggle the preview window |
 | `Ctrl-D` / `Ctrl-U` | Scroll the preview down / up |
+| `Alt-W` | Toggle wrapping of long lines in the preview, so you see each line in full (off by default) |
+| `Alt-N` | Toggle the preview between bat's normal look (file name, grid, line numbers) and plain highlighted text (on by default) |
+| `Alt-/` or `F1` | Open the list of keybindings, read-only, in `$EDITOR`; close it to return |
 | `Esc` | Exit |
 
 The prompt shows how your text is matched: `Content (regex)`, `Content (pcre2)` while PCRE2 is on, or `Filename (fuzzy)`. Active toggles appear after it: `[H]` for hidden files, `[V]` for invert match, and `[P]` in filename mode while PCRE2 is on.

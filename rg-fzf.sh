@@ -24,6 +24,9 @@ Keybindings:
   Ctrl-P      Toggle preview
   Ctrl-D      Scroll preview down
   Ctrl-U      Scroll preview up
+  Alt-W       Toggle line wrapping in the preview
+  Alt-N       Toggle line numbers in the preview
+  Alt-/  F1   Open these keybindings (read-only) in $EDITOR
   Esc         Exit
 
 Prompt: "Content (regex)" uses ripgrep's default regex engine, "Content (pcre2)" uses
@@ -82,16 +85,20 @@ for p in "${PATHS[@]}"; do
     [[ -e $p ]] || die "no such file or directory: $p"
 done
 
-HEADER_CONTENT='C-f:filename | C-e:edit | M-v:invert | M-h:hidden | M-p:pcre2 | Tab:select | M-enter:json'
-HEADER_FILENAME='C-f:content | C-e:edit | M-v:invert | M-h:hidden | M-p:pcre2 | Tab:select | M-enter:json'
+HEADER_CONTENT='C-f:filename | C-e:edit | M-v:invert | M-h:hidden | M-p:pcre2 | Tab:select | M-enter:json | M-/:keys'
+HEADER_FILENAME='C-f:content | C-e:edit | M-v:invert | M-h:hidden | M-p:pcre2 | Tab:select | M-enter:json | M-/:keys'
 
 # Private directory for the helper scripts and state, removed on exit.
 # State files: content-q and file-q hold the saved query of each mode;
-# invert, hidden and pcre2 exist while that toggle is on.
+# invert, hidden and pcre2 exist while that toggle is on; nonum exists while preview
+# line numbers are off. rg-fzf-keybindings.txt is the read-only list Alt-/ opens.
 STATE=$(mktemp -d)
 SEARCH="$STATE/search.sh"
 ACTIONS="$STATE/actions.sh"
 trap 'rm -rf "$STATE"' EXIT
+KEYS_FILE="$STATE/rg-fzf-keybindings.txt"
+show_help | sed -n '/^Keybindings:/,/^Examples:/p' | sed '$d' > "$KEYS_FILE"
+chmod 444 "$KEYS_FILE"
 
 # Print "NAME=(values...)" shell-quoted, so values with spaces survive into the helpers
 emit_array() {
@@ -191,6 +198,10 @@ prompt() {
 if [[ $FZF_PROMPT == Filename* ]]; then MODE=Filename; else MODE=Content; fi
 
 case $1 in
+    toggle-numbers)
+        if [[ -f $S/nonum ]]; then rm -f "$S/nonum"; else touch "$S/nonum"; fi
+        echo "refresh-preview"
+        ;;
     query-changed)
         # Filename mode: fzf filters live. Content mode: re-run the search.
         # {q} is left for fzf to fill in (it quotes it), never expanded here.
@@ -225,6 +236,13 @@ SCRIPT
 } > "$ACTIONS"
 
 chmod +x "$SEARCH" "$ACTIONS"
+
+# Preview: bat's usual look (header, grid, line numbers; your bat config applies), or
+# with Alt-N, bat's plain style: just the highlighted text. The matched line is
+# highlighted either way.
+# Written for any shell, since fzf runs it with $SHELL (bash, zsh, sh...).
+PREVIEW_CMD="if [ -f $(printf '%q' "$STATE/nonum") ]; then set -- --style=plain; else set --; fi;"
+PREVIEW_CMD+=' bat --color=always "$@" --highlight-line {2} -- {1} 2>/dev/null || cat -- {1}'
 
 # fzf prints the query, then the key that closed it (empty for Enter, "alt-enter" for
 # Alt-Enter), then the selected lines. Enter: plain file:line:column:text.
@@ -300,5 +318,9 @@ fzf \
   --bind "ctrl-d:preview-half-page-down" \
   --bind "ctrl-u:preview-half-page-up" \
   --bind "ctrl-e:execute(${EDITOR:-vim} {1} +{2})" \
-  --preview 'bat --color=always --highlight-line {2} -- {1} 2>/dev/null || cat -- {1}' \
+  --bind "alt-w:toggle-preview-wrap" \
+  --bind "alt-n:transform:'$ACTIONS' toggle-numbers" \
+  --bind "alt-/:execute:${EDITOR:-vim} $(printf '%q' "$KEYS_FILE")" \
+  --bind "f1:execute:${EDITOR:-vim} $(printf '%q' "$KEYS_FILE")" \
+  --preview "$PREVIEW_CMD" \
   --preview-window 'up,60%,border-bottom,+{2}+3/3,~3' | print_selection

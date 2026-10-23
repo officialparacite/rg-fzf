@@ -4,13 +4,14 @@ keypresses, and reads results back through fzf's --listen API.
 
 Usage: python3 tests/test_rg_fzf.py     (needs rg, fzf, jq; bat optional)
 """
-import fcntl, json, os, pty, re, select, signal, struct, subprocess, sys, tempfile, termios, time, urllib.request
+import fcntl, json, os, urllib.error, pty, re, select, signal, struct, subprocess, sys, tempfile, termios, time, urllib.request
 
-signal.alarm(240)  # hard stop so the suite can never hang
-SCRIPT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "rg-fzf.sh")
-PORT = 6350
+signal.alarm(360)  # hard stop so the suite can never hang
+SCRIPT = os.environ.get("RGF_SCRIPT") or os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "rg-fzf.sh")
+PORT = int(os.environ.get("RGF_PORT", "6350"))
 ESC_RE = re.compile(rb"\x1b\[[0-9;?]*[a-zA-Z]")
 
+STARTED = time.time()
 LONG = "x" * 600 + " initLong end"
 T = tempfile.mkdtemp()   # searched tree
 H = tempfile.mkdtemp()   # harness files, outside the searched tree
@@ -24,11 +25,12 @@ FILES = {
     "n:12:3:x.txt": b"line one\nhello colon: yes\n",
     "latin1.txt": b"caf\xe9 hello\n",
     "app.js": ("const initialLevel = data?.initialLevel || x;\n// Initial level\n" + LONG + "\n").encode(),
+    "wide.txt": ("wrapme " + "w" * 400 + " ZZTAILWORD\nsecond line\n").encode(),
 }
 for p, c in FILES.items():
     open(f"{T}/{p}", "wb").write(c)
 ALL_HELLO = ["-dash.txt", "latin1.txt", "my dir/a b.txt", "n:12:3:x.txt", "notes.md", "other.py"]
-ALL_FILES = sorted(ALL_HELLO + ["app.js"])
+ALL_FILES = sorted(ALL_HELLO + ["app.js", "wide.txt"])
 
 run = f"{H}/run.sh"
 open(run, "w").write(open(SCRIPT).read().replace("\nfzf \\\n", f"\nfzf --listen {PORT} \\\n", 1))
@@ -46,6 +48,7 @@ def check(name, cond, detail=""):
 class Session:
     def __init__(self, *args):
         self.out = b""
+        self.last_key = 0
         self.pid, self.fd = pty.fork()
         if self.pid == 0:
             os.chdir(T)
@@ -66,17 +69,50 @@ class Session:
 
     def key(self, b, wait=1.0):
         os.write(self.fd, b)
+        self.last_key = time.time()
         self.pump(wait)
 
     def api(self):
-        return json.load(urllib.request.urlopen(f"http://localhost:{PORT}?limit=200", timeout=5))
+        # fzf answers 503 while it is blocked writing to the terminal, so keep reading
+        # its output between tries
+        for attempt in range(80):
+            try:
+                return json.load(urllib.request.urlopen(f"http://localhost:{PORT}?limit=200", timeout=5))
+            except urllib.error.HTTPError as e:
+                if e.code != 503 or attempt == 79:
+                    raise
+                self.pump(0.25)
 
     def state(self):
-        d = self.api()
-        return d["query"], sorted(m["text"] for m in d["matches"])
+        """Results once fzf has finished loading them. A key that reloads the list starts
+        a search a moment later, so after one, wait for fzf to start reading, then for it
+        to finish and the results to settle. In filename mode keys filter in place and
+        never reload, so there is nothing to wait for."""
+        start = time.time()
+        while self.last_key and time.time() - start < 3 and time.time() - self.last_key < 3:
+            d = self.api()
+            if d["reading"] or b"Filename (" in self.screen()[-2000:]:
+                break
+            self.pump(0.1)
+        self.last_key = 0
+        last, end = None, time.time() + 30
+        while True:
+            d = self.api()
+            cur = (d["query"], sorted(m["text"] for m in d["matches"]))
+            if not d["reading"] and cur == last or time.time() > end:
+                return cur
+            last = cur
+            self.pump(0.3)
 
-    def screen(self):
-        return ESC_RE.sub(b"", self.out)
+    def screen(self, since=0):
+        return ESC_RE.sub(b"", self.out[since:])
+
+    def until(self, mark, needle, timeout=10):
+        """Screen text since mark, once it contains needle (or after timeout)."""
+        end = time.time() + timeout
+        while needle not in self.screen(mark) and time.time() < end:
+            self.pump(0.2)
+        return self.screen(mark)
 
     def finish(self, keys):
         """Press the exit keys; return the raw bytes printed after fzf leaves the screen."""
@@ -103,6 +139,7 @@ def cli(*args):
 
 # ---------- Command-line arguments ----------
 check("-h prints help", cli("-h") == (0, cli("--help")[1]) and "Usage:" in cli("-h")[1])
+check("-h lists the new keys", all(k in cli("-h")[1] for k in ("Alt-W", "Alt-N", "Alt-/  F1")))
 check("-t with no value is an error", cli("-t")[0] == 1 and "needs a file type" in cli("-t")[1])
 check("unknown type is an error", cli("-t", "nosuch")[0] == 1)
 check("'-t j.' is rejected (no regex matching)", cli("-t", "j.")[0] == 1)
@@ -306,12 +343,69 @@ s.finish(b"\x1b")
 s = Session("notes.md")
 s.key(b"hello")
 check("single file argument shows its filename", names(s.state()[1]) == ["notes.md"])
+s.finish(b"\x1b")
 
-# ---------- Session 9: Esc prints nothing ----------
+# ---------- Session 9: preview keys ----------
+s = Session("wide.txt", "notes.md")
+s.key(b"second")
+q, m = s.state()
+check("preview session: one match in wide.txt", names(m) == ["wide.txt"], m)
+s.pump(1.5)
+check("header lists M-/:keys", b"M-/:keys" in s.screen())
+check("by default bat shows its header and line numbers", re.search(rb"File: wide\.txt", s.screen()) is not None
+      and re.search(rb"\s2 \xe2\x94\x82 second line", s.screen()) is not None, s.screen()[-500:])
+check("long line cut off without wrapping", b"ZZTAILWORD" not in s.screen(), s.screen()[-300:])
+mark = len(s.out)
+s.key(b"\x1bw")
+check("Alt-W wraps the preview: whole line visible", b"ZZTAILWORD" in s.until(mark, b"ZZTAILWORD"), s.screen(mark)[-300:])
+mark = len(s.out)
+s.key(b"\x1bw")
+s.pump(1)
+check("Alt-W again stops wrapping", b"ZZTAILWORD" not in s.screen(mark), s.screen(mark)[-300:])
+mark = len(s.out)
+s.key(b"\x1bn")
+plain = s.until(mark, b"second line")
+check("Alt-N: no line numbers, no bat header", b"second line" in plain and b"File: wide.txt" not in plain
+      and re.search(rb"\s2 \xe2\x94\x82 second line", plain) is None, plain[-400:])
+check("...matched line still highlighted", re.search(rb"\x1b\[[0-9;]*48;[0-9;]*m[^\n]*second line", s.out[mark:]) is not None, s.out[mark:][-400:])
+mark = len(s.out)
+s.key(b"\x1bn")
+back = s.until(mark, b"File: wide.txt")
+check("Alt-N again brings them back", b"File: wide.txt" in back and re.search(rb"\s2 \xe2\x94\x82 second line", back) is not None, back[-400:])
+
+def keys_file_opened(key):
+    if os.path.exists(editor_log):
+        os.remove(editor_log)
+    s.key(key, 2)
+    log = open(editor_log).read().split("\n") if os.path.exists(editor_log) else []
+    path = log[0] if log else ""
+    return path.endswith("/rg-fzf-keybindings.txt") and os.path.isfile(path), path, log
+ok, path, log = keys_file_opened(b"\x1b/")
+check("Alt-/ opens the keybinding list in $EDITOR", ok and len(log) == 2, log)
+if ok:
+    text = open(path).read()
+    check("...read-only", (os.stat(path).st_mode & 0o222) == 0, oct(os.stat(path).st_mode))
+    check("...keybindings and prompt info only", text.startswith("Keybindings:\n") and "Toggle line wrapping" in text
+          and "Prompt:" in text and "Examples:" not in text and "Usage:" not in text, text[:300])
+ok2, path2, log = keys_file_opened(b"\x1bOP")
+check("F1 opens the same list", ok2 and path2 == path, log)
+check("query untouched by the new keys", s.state()[0] == "second")
+s.key(b"\x05", 1.5)
+check("Ctrl-E still opens the file at the line", open(editor_log).read().split("\n")[:2] == ["wide.txt", "+2"])
+s.finish(b"\x1b")
+check("keybinding list removed with the rest on exit", not os.path.exists(path))
+
+# ---------- Session 10: Esc prints nothing ----------
+s = Session("notes.md")
+s.key(b"hello")
 check("Esc prints nothing", s.finish(b"\x1b") == b"")
 
-tmp = os.environ.get("TMPDIR", "/tmp")
-leftover = [x for x in os.listdir(tmp) if os.path.isfile(os.path.join(tmp, x, "search.sh"))]
+# State dirs made while this suite ran. (With several copies of the suite running at
+# once, a copy still running elsewhere can show up here too.)
+tmp = os.path.realpath(subprocess.run(["bash", "-c", "d=$(mktemp -d) && dirname \"$d\" && rmdir \"$d\""],
+                                      capture_output=True, text=True).stdout.strip())
+leftover = [x for x in os.listdir(tmp) if os.path.isfile(os.path.join(tmp, x, "search.sh"))
+            and os.path.isfile(os.path.join(tmp, x, "rg-fzf-keybindings.txt")) and os.stat(os.path.join(tmp, x)).st_mtime >= STARTED]
 check("state dirs removed on exit", not leftover, leftover)
 
 subprocess.run(["rm", "-rf", T, H])
