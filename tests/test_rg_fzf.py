@@ -6,7 +6,7 @@ Usage: python3 tests/test_rg_fzf.py     (needs rg, fzf, bat, jq)
 """
 import fcntl, json, os, shutil, urllib.error, pty, re, select, signal, struct, subprocess, sys, tempfile, termios, time, urllib.request
 
-signal.alarm(360)  # hard stop so the suite can never hang
+signal.alarm(600)  # hard stop so the suite can never hang
 SCRIPT = os.environ.get("RGF_SCRIPT") or os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "rg-fzf.sh")
 PORT = int(os.environ.get("RGF_PORT", "6350"))
 ESC_RE = re.compile(rb"\x1b\[[0-9;?]*[a-zA-Z]")
@@ -32,8 +32,20 @@ for p, c in FILES.items():
 ALL_HELLO = ["-dash.txt", "latin1.txt", "my dir/a b.txt", "n:12:3:x.txt", "notes.md", "other.py"]
 ALL_FILES = sorted(ALL_HELLO + ["app.js", "wide.txt"])
 
-run = f"{H}/run.sh"
-open(run, "w").write(open(SCRIPT).read().replace("\nfzf \\\n", f"\nfzf --listen {PORT} \\\n", 1))
+# Separate tree for piped file lists: tricky names, a directory, hidden files
+P = tempfile.mkdtemp()
+os.makedirs(f"{P}/sub")
+PFILES = {"sp ace.txt": b"pipeword one\n", "-lead.txt": b"pipeword two\n", "c:1:2.txt": b"pipeword three\n",
+          "nl\nname.txt": b"pipeword UNIQNL\n", ".tophidden.txt": b"pipeword top\n", "sub/inner.txt": b"pipeword inner\n",
+          "sub/.subhidden.txt": b"pipeword sub\n", "unlisted.txt": b"pipeword unlisted\n"}
+for p_, c in PFILES.items():
+    open(f"{P}/{p_}", "wb").write(c)
+
+# Copies of the script that also listen on a port, so tests can read fzf's state.
+# run2 is the second rg-fzf in a chain.
+run, run2 = f"{H}/run.sh", f"{H}/run2.sh"
+for path, port in ((run, PORT), (run2, PORT + 1)):
+    open(path, "w").write(open(SCRIPT).read().replace("\nfzf \\\n", f"\nfzf --listen {port} \\\n", 1))
 editor_log = f"{H}/editor.log"
 editor = f"{H}/fake-editor"
 open(editor, "w").write(f"#!/bin/bash\nprintf '%s\\n' \"$@\" > '{editor_log}'\n")
@@ -46,13 +58,17 @@ def check(name, cond, detail=""):
     fails += 0 if cond else 1
 
 class Session:
-    def __init__(self, *args):
+    """rg-fzf in a pseudo-terminal. cmd: a bash command line to run instead (for pipes)."""
+    def __init__(self, *args, cmd=None, cwd=None):
         self.out = b""
         self.last_key = 0
+        self.port = PORT
         self.pid, self.fd = pty.fork()
         if self.pid == 0:
-            os.chdir(T)
+            os.chdir(cwd or T)
             os.environ["EDITOR"] = editor
+            if cmd:
+                os.execvp("bash", ["bash", "-c", cmd])
             os.execvp("bash", ["bash", run, *args])
         fcntl.ioctl(self.fd, termios.TIOCSWINSZ, struct.pack("HHHH", 40, 140, 0, 0))
         self.pump(2)
@@ -68,18 +84,28 @@ class Session:
                     return
 
     def key(self, b, wait=1.0):
-        os.write(self.fd, b)
+        if b in (b"\x01", b"\t", b"\t\t") and self.last_key:
+            self.state()  # select only once the results are complete
+        try:
+            os.write(self.fd, b)
+        except OSError:  # rg-fzf already exited; the checks that follow will fail
+            pass
         self.last_key = time.time()
         self.pump(wait)
 
     def api(self):
         # fzf answers 503 while it is blocked writing to the terminal, so keep reading
         # its output between tries
+        # (or isn't listening yet, when it is the second rg-fzf of a chain)
         for attempt in range(80):
             try:
-                return json.load(urllib.request.urlopen(f"http://localhost:{PORT}?limit=200", timeout=5))
+                return json.load(urllib.request.urlopen(f"http://localhost:{self.port}?limit=200", timeout=5))
             except urllib.error.HTTPError as e:
                 if e.code != 503 or attempt == 79:
+                    raise
+                self.pump(0.25)
+            except urllib.error.URLError:
+                if attempt == 79:
                     raise
                 self.pump(0.25)
 
@@ -137,9 +163,15 @@ def cli(*args):
     p = subprocess.run(["bash", SCRIPT, *args], cwd=T, capture_output=True, text=True, stdin=subprocess.DEVNULL, timeout=5)
     return p.returncode, p.stdout + p.stderr
 
+def cli_in(data, *args):
+    """rg-fzf with data piped to stdin (only for runs that stop before fzf opens)."""
+    p = subprocess.run(["bash", SCRIPT, *args], cwd=P, input=data, capture_output=True, timeout=10)
+    return p.returncode, (p.stdout + p.stderr).decode(errors="replace").strip()
+
 # ---------- Command-line arguments ----------
 check("-h prints help", cli("-h") == (0, cli("--help")[1]) and "Usage:" in cli("-h")[1])
-check("-h lists the new keys", all(k in cli("-h")[1] for k in ("Alt-W", "Alt-N", "Alt-/  F1")))
+check("-h lists the new keys", all(k in cli("-h")[1] for k in ("Alt-W", "Alt-N", "Alt-/  F1", "Alt-U", "Ctrl-O", "-0, --null")))
+check("-h no longer lists -t", "--type" not in cli("-h")[1] and "-t, " not in cli("-h")[1])
 def without(tool):
     """Runs rg-fzf with a PATH that has every tool it needs except one."""
     d = tempfile.mkdtemp()
@@ -152,17 +184,24 @@ def without(tool):
     return p.returncode, p.stderr.strip()
 for tool in ("rg", "fzf", "bat", "jq"):
     check(f"refuses to start without {tool}", without(tool) == (1, f"rg-fzf: {tool} is not installed"), without(tool))
-check("-t with no value is an error", cli("-t")[0] == 1 and "needs a file type" in cli("-t")[1])
-check("unknown type is an error", cli("-t", "nosuch")[0] == 1)
-check("'-t j.' is rejected (no regex matching)", cli("-t", "j.")[0] == 1)
+check("-t is gone: unknown option", cli("-t", "js")[0] == 1 and "unknown option '-t'" in cli("-t", "js")[1], cli("-t", "js"))
+check("--type is gone too", cli("--type", "js")[0] == 1 and "unknown option" in cli("--type", "js")[1])
 check("unknown option is an error", cli("-x")[0] == 1 and "unknown option" in cli("-x")[1])
-check("missing path is an error", cli("/nope")[0] == 1 and "no such file" in cli("/nope")[1])
+# (stdin is /dev/null here, which must not count as a piped list, or this would say "not both")
+check("missing path is an error", cli("/nope")[0] == 1 and "no such file" in cli("/nope")[1], cli("/nope"))
+check("empty pipe is an error", cli_in(b"") == (1, "rg-fzf: no files given on stdin"), cli_in(b""))
+check("pipe plus paths is an error", cli_in(b"sp ace.txt\n", "sub") == (1, "rg-fzf: give paths or a file list on stdin, not both"),
+      cli_in(b"sp ace.txt\n", "sub"))
+check("pipe with only missing names is an error", cli_in(b"nope1\nnope2\n") == (1, "rg-fzf: none of the files given on stdin exist"),
+      cli_in(b"nope1\nnope2\n"))
+check("pipe of blank lines is an error", cli_in(b"\n\n")[0] == 1, cli_in(b"\n\n"))
 
 # ---------- Session 1: interactive behaviour, plain Enter output ----------
 s = Session()
 q, m = s.state()
 check("startup lists visible files, no hidden", names(m) == ALL_FILES, m)
 check("header shows M-enter:json and M-p:pcre2", b"M-enter:json" in s.screen() and b"M-p:pcre2" in s.screen())
+check("header shows M-u:unique and C-o:lines", b"M-u:unique" in s.screen() and b"C-o:lines" in s.screen())
 check("prompt shows Content (regex)>", b"Content (regex)>" in s.screen())
 
 s.key(b"hello")
@@ -273,31 +312,61 @@ check("Shift-Tab toggles and moves back", len(s.api()["selected"]) == 3)
 s.key(b"\x1b[Z"); s.key(b"\x1b[Z")
 sel = sorted(x["text"] for x in s.api()["selected"])
 check("Shift-Tab deselects", len(sel) == 1, sel)
-raw = s.finish(b"\r")
+raw = s.finish(b"\x0f")
 want = [x.replace("\x00", "").encode() for x in sel]
-check("Enter prints the selected line as file:line:column:text", raw.split(b"\n") == want, (raw, want))
-check("plain output has no NUL", b"\x00" not in raw)
+check("Ctrl-O prints the selected line as file:line:column:text", raw.split(b"\n") == want, (raw, want))
+check("Ctrl-O output has no NUL", b"\x00" not in raw)
 
-# ---------- Session 2: plain Enter keeps non-UTF-8 bytes ----------
+# ---------- Session 2: Ctrl-O keeps non-UTF-8 bytes ----------
 s = Session()
 s.key(b"hello"); s.key(b"\x06"); s.key(b"latin"); s.key(b"\x06"); s.key(b"\x01")
-raw = s.finish(b"\r")
-check("Enter output: invalid UTF-8 shown as U+FFFD, rest intact", raw == "latin1.txt:1:6:caf\ufffd hello".encode(), raw)
+raw = s.finish(b"\x0f")
+check("Ctrl-O output: invalid UTF-8 shown as U+FFFD, rest intact", raw == "latin1.txt:1:6:caf\ufffd hello".encode(), raw)
+
+# ---------- Session 2b: Enter prints file names ----------
+s = Session()
+s.key(b"hello"); s.key(b"\x01")
+check("Enter: file names of all selected lines, sorted, one per line", s.finish(b"\r") == "\n".join(ALL_HELLO).encode())
+s = Session()
+s.key(b"init\\w+", 1.5)
+check("init search has 3 rows in one file", names(s.state()[1]) == ["app.js"] * 3, s.state())
+s.key(b"\x01")
+check("Enter: a file with several selected lines is printed once", s.finish(b"\r") == b"app.js")
+s = Session()
+s.key(b"hello"); s.key(b"\t\t")
+check("Enter: only the selected lines' files", len(s.finish(b"\r").split(b"\n")) == 2)
+s = Session()
+s.key(b"hello")
+out = s.finish(b"\r")
+check("Enter with nothing selected: the current line's file", out in [x.encode() for x in ALL_HELLO], out)
+s = Session("notes.md")
+check("Enter from the empty-search file list", s.finish(b"\r") == b"notes.md")
+s = Session()
+s.key(b"hello"); s.key(b"\x06"); s.key(b"ab")
+check("Enter from filename mode", s.finish(b"\r") == b"my dir/a b.txt")
+s = Session("-0")
+s.key(b"hello"); s.key(b"\x01")
+check("-0: Enter separates names with NUL", s.finish(b"\r") == b"".join(x.encode() + b"\x00" for x in ALL_HELLO))
+s = Session("--null")
+s.key(b"hello"); s.key(b"\x01")
+out = s.finish(b"\x0f")
+check("-0 leaves Ctrl-O unchanged", out.count(b"\n") == 5 and b"\x00" not in out, out)
 
 # ---------- Session 3: Alt-Enter JSON, plain word, special characters ----------
 s = Session()
-s.key(b"hello"); s.key(b"\x01")
+s.key(b"hello"); s.state(); s.key(b"\x01")
 d = load(s.finish(b"\x1b\r"), "matches JSON")
 if d:
     check("JSON is {query, results}", set(d) == {"query", "results"} and d["query"] == "hello", list(d))
     r = {x["file"]: x for x in d["results"]}
     check("all 6 results", sorted(r) == ALL_HELLO, sorted(r))
     check("result keys file/line/column/text/matches", all(set(x) == {"file", "line", "column", "text", "matches"} for x in d["results"]))
-    check("matches keep the file's case", r["other.py"]["matches"] == ["HELLO"], r["other.py"])
-    c = r["n:12:3:x.txt"]
-    check("colon filename exact", (c["line"], c["column"], c["text"], c["matches"]) == (2, 1, "hello colon: yes", ["hello"]), c)
-    check("quotes, backslash, tab survive", r["notes.md"]["text"] == 'hello "quoted" \\ back\ttab', r["notes.md"])
-    check("Latin-1 line still has its match", r["latin1.txt"]["matches"] == ["hello"] and r["latin1.txt"]["text"].endswith(" hello"), r["latin1.txt"])
+    check("matches keep the file's case", r.get("other.py", {}).get("matches") == ["HELLO"], r.get("other.py"))
+    c = r.get("n:12:3:x.txt", {})
+    check("colon filename exact", [c.get(k) for k in ("line", "column", "text", "matches")] == [2, 1, "hello colon: yes", ["hello"]], c)
+    check("quotes, backslash, tab survive", r.get("notes.md", {}).get("text") == 'hello "quoted" \\ back\ttab', r.get("notes.md"))
+    l1 = r.get("latin1.txt", {})
+    check("Latin-1 line still has its match", l1.get("matches") == ["hello"] and l1.get("text", "").endswith(" hello"), l1)
 
 # ---------- Session 4: regex with several matches per line, long line ----------
 s = Session()
@@ -343,10 +412,10 @@ if d:
     check("file list: query '' and {file} entries",
           d["query"] == "" and sorted(x["file"] for x in d["results"]) == ALL_FILES and all(set(x) == {"file"} for x in d["results"]), d)
 
-# ---------- Session 8: -t and path arguments ----------
-s = Session("-t", "py")
+# ---------- Session 8: rg --files -t replaces -t; path arguments ----------
+s = Session(cmd=f"rg --files -t py | bash '{run}'")
 s.key(b"hello")
-check("-t py searches only .py files", names(s.state()[1]) == ["other.py"])
+check("rg --files -t py | rg-fzf searches only .py files", names(s.state()[1]) == ["other.py"], s.state())
 s.finish(b"\x1b")
 s = Session("my dir")
 s.key(b"hello")
@@ -407,6 +476,94 @@ check("Ctrl-E still opens the file at the line", open(editor_log).read().split("
 s.finish(b"\x1b")
 check("keybinding list removed with the rest on exit", not os.path.exists(path))
 
+# ---------- Session 9b: Alt-U, one result per file ----------
+s = Session()
+s.key(b"in", 1.5)
+q, m = s.state()
+check("'in' without Alt-U: several rows per file", names(m) == ["app.js"] * 3 + ["n:12:3:x.txt", "wide.txt"], m)
+mark = len(s.out)
+s.key(b"\x1bu", 1.5)
+q, m = s.state()
+first = {fields(x)[0]: fields(x)[1] for x in m}
+check("Alt-U: each file once", names(m) == ["app.js", "n:12:3:x.txt", "wide.txt"], m)
+check("...at its first match", first == {"app.js": "1", "n:12:3:x.txt": "1", "wide.txt": "2"}, first)
+check("...prompt shows [U]", b"Content (regex) [U]>" in s.screen(mark))
+mark = len(s.out)
+s.key(b"\x06", 1.5)
+q, m = s.state()
+check("Alt-U in filename mode: each file once", names(m) == ["app.js", "n:12:3:x.txt", "wide.txt"], m)
+check("...prompt shows [U] there too", b"Filename (fuzzy) [U]>" in s.screen(mark))
+s.key(b"\x06", 1.5)
+check("back to content mode: still one per file", names(s.state()[1]) == ["app.js", "n:12:3:x.txt", "wide.txt"])
+s.key(b"\x1bv", 1.5)
+m = s.state()[1]
+check("Alt-U with invert: one non-matching line per file", len(m) == len(set(names(m))) and "app.js" not in names(m)
+      and "other.py" in names(m), m)
+s.key(b"\x1bv", 1.5); s.state()
+s.key(b"\x01")
+out = s.finish(b"\x0f").split(b"\n")
+check("Ctrl-O with Alt-U: one line per file", sorted(out) == [b"app.js:1:7:const initialLevel = data?.initialLevel || x;",
+      b"n:12:3:x.txt:1:2:line one", b"wide.txt:2:9:second line"], out)
+s = Session()
+s.key(b"in", 1.5); s.key(b"\x1bu", 1.5); s.state()
+mark = len(s.out)
+s.key(b"\x1bu", 1.5)
+check("Alt-U again: all rows back", len(s.state()[1]) == 5)
+check("...and [U] gone", b"Content (regex)>" in s.screen(mark) and b"[U]>" not in s.screen(mark))
+s.finish(b"\x1b")
+
+# ---------- Session 9c: file list on stdin ----------
+open(f"{H}/list.txt", "wb").write(b"sp ace.txt\n-lead.txt\nc:1:2.txt\n.tophidden.txt\nsub\nsp ace.txt\nmissing.txt\n\n")
+LISTED = sorted(["-lead.txt", ".tophidden.txt", "c:1:2.txt", "sp ace.txt", "sub/inner.txt"])
+s = Session(cmd=f"cat '{H}/list.txt' | bash '{run}'", cwd=P)
+q, m = s.state()
+check("piped list: startup shows each listed file once, directories expanded", names(m) == LISTED, m)
+check("piped list: missing name reported", b"rg-fzf: skipped 1 name(s) from stdin that don't exist" in s.out, s.out[:300])
+s.key(b"pipeword", 1.5)
+check("piped list: search covers only the listed files", names(s.state()[1]) == LISTED, s.state())
+check("...a hidden file named in the list is searched without Alt-H", ".tophidden.txt" in names(s.state()[1]))
+s.key(b"\x1bh", 1.5)
+check("...Alt-H adds hidden files inside listed directories", names(s.state()[1]) == sorted(LISTED + ["sub/.subhidden.txt"]))
+s.key(b"\x06"); s.key(b"lead")
+check("piped list: filename mode works", names(s.state()[1]) == ["-lead.txt"], s.state())
+s.key(b"\x06", 1.5)
+check("...and back in content mode it stays narrowed", names(s.state()[1]) == ["-lead.txt"], s.state())
+s.key(b"\x01")
+check("piped list: Enter prints the names", s.finish(b"\r") == b"-lead.txt")
+s = Session(cmd=f"bash '{run}' < '{H}/list.txt'", cwd=P)
+check("file redirected to stdin works the same", names(s.state()[1]) == LISTED, s.state())
+s.finish(b"\x1b")
+open(f"{H}/list0", "wb").write(b"nl\nname.txt\x00sp ace.txt\x00-lead.txt\x00c:1:2.txt\x00")
+s = Session(cmd=f"cat '{H}/list0' | bash '{run}'", cwd=P)
+s.key(b"UNIQNL", 1.5)
+check("NUL-separated list: a name containing a newline is read and searched",
+      any("UNIQNL" in x for x in s.state()[1]), s.state())
+s.key(CLR + b"two|three", 1.5)
+check("NUL-separated list: other names searched", names(s.state()[1]) == ["-lead.txt", "c:1:2.txt"], s.state())
+s.finish(b"\x1b")
+s = Session("-0", cmd=f"cat '{H}/list0' | bash '{run}' -0", cwd=P)
+s.key(b"two|three|one", 1.5); s.key(b"\x01")
+check("NUL list in, -0 Enter out: exact names", s.finish(b"\r") == b"-lead.txt\x00c:1:2.txt\x00sp ace.txt\x00")
+
+# ---------- Session 9d: chaining rg-fzf | rg-fzf ----------
+s = Session(cmd=f"bash '{run}' | bash '{run2}'")
+s.key(b"bar", 1.5)
+check("chain: first rg-fzf finds the file", names(s.state()[1]) == ["other.py"], s.state())
+s.port = PORT + 1
+try:
+    urllib.request.urlopen(f"http://localhost:{PORT + 1}", timeout=1)
+    waiting = False
+except urllib.error.URLError:
+    waiting = True
+check("chain: second rg-fzf waits until the first is done", waiting)
+s.port = PORT
+s.key(b"\r", 2)
+s.port = PORT + 1
+s.last_key = 0
+s.key(b"hello", 1.5)
+check("chain: second rg-fzf searches only the picked file", names(s.state()[1]) == ["other.py"], s.state())
+check("chain: final output", s.finish(b"\x0f") == b"other.py:1:1:HELLO there")
+
 # ---------- Session 10: Esc prints nothing ----------
 s = Session("notes.md")
 s.key(b"hello")
@@ -420,6 +577,6 @@ leftover = [x for x in os.listdir(tmp) if os.path.isfile(os.path.join(tmp, x, "s
             and os.path.isfile(os.path.join(tmp, x, "rg-fzf-keybindings.txt")) and os.stat(os.path.join(tmp, x)).st_mtime >= STARTED]
 check("state dirs removed on exit", not leftover, leftover)
 
-subprocess.run(["rm", "-rf", T, H])
+subprocess.run(["rm", "-rf", T, H, P])
 print(f"\n{fails} failure(s)")
 sys.exit(1 if fails else 0)

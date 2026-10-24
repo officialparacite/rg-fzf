@@ -3,24 +3,29 @@
 show_help() {
     cat << 'EOF'
 Usage: rg-fzf [options] [paths...]
+       command | rg-fzf [options]
+
+Searches the given paths (default: the current directory), or the files listed on
+stdin: one per line, or NUL-separated (find -print0, fd -0).
 
 Options:
-  -t, --type TYPE     Only search files of this type (js, py, ts, ...).
-                      Repeatable: -t js -t ts. See `rg --type-list`.
+  -0, --null          Enter prints file names separated by NUL instead of newlines
   -h, --help          Show help
 
 Keybindings:
   Ctrl-E      Open in $EDITOR at matching line
   Ctrl-F      Toggle content/filename mode
   Alt-V       Toggle invert match
-  Alt-H       Toggle hidden files
+  Alt-H       Toggle hidden files (inside directories; listed files are always searched)
   Alt-P       Toggle PCRE2 (lookarounds, backreferences)
+  Alt-U       Toggle one result per file (its first match)
   Tab         Toggle selection and move to the next line
   Shift-Tab   Toggle selection and move to the previous line
   Ctrl-A      Select all
   Ctrl-Z      Deselect all
-  Enter       Print selected lines (or the current line) and exit
-  Alt-Enter   Same, as JSON with the query and matched text
+  Enter       Print the files of the selected lines (or the current line) and exit
+  Ctrl-O      Print the selected lines as file:line:column:text and exit
+  Alt-Enter   Same as Ctrl-O, as JSON with the query and matched text
   Ctrl-P      Toggle preview
   Ctrl-D      Scroll preview down
   Ctrl-U      Scroll preview up
@@ -31,13 +36,16 @@ Keybindings:
 
 Prompt: "Content (regex)" uses ripgrep's default regex engine, "Content (pcre2)" uses
 PCRE2 (Alt-P), and "Filename (fuzzy)" fuzzy-matches filenames.
-Flags: [H] hidden files on, [V] invert match on, [P] PCRE2 on (shown in filename mode)
+Flags: [H] hidden files on, [V] invert match on, [U] one result per file,
+[P] PCRE2 on (shown in filename mode)
 
 Examples:
-  rg-fzf                        # Search current directory
-  rg-fzf src/                   # Search in src/
-  rg-fzf -t js -t ts src/       # Search only .js and .ts files in src/
-  rg-fzf file1.txt file2.txt    # Search specific files
+  rg-fzf                        # Search the current directory
+  rg-fzf src/ file.txt          # Search these paths
+  rg --files -t js | rg-fzf     # Search only .js files
+  git ls-files | rg-fzf         # Search only files tracked by git
+  rg-fzf | rg-fzf               # Pick files with one search, then search just those
+  rg-fzf | xargs nvim           # Open the files you pick
 EOF
 }
 
@@ -50,17 +58,14 @@ for cmd in rg fzf bat jq; do
     command -v "$cmd" > /dev/null || die "$cmd is not installed"
 done
 
-TYPES=()
 PATHS=()
+NUL_OUT=0
 
 while [[ $# -gt 0 ]]; do
     case $1 in
-        -t|--type)
-            [[ $# -ge 2 ]] || die "$1 needs a file type"
-            [[ $2 == all ]] || rg --type-list | cut -d: -f1 | grep -qxF -- "$2" ||
-                die "unknown file type '$2' (see rg --type-list)"
-            TYPES+=(--type "$2")
-            shift 2
+        -0|--null)
+            NUL_OUT=1
+            shift
             ;;
         -h|--help)
             show_help
@@ -81,21 +86,48 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
+# A pipe or a file on stdin is the list of files to search. (/dev/null, as in cron,
+# counts as nothing given.)
+PIPED=0
+[[ -p /dev/stdin || -f /dev/stdin ]] && PIPED=1
+[[ $PIPED == 1 && ${#PATHS[@]} -gt 0 ]] && die "give paths or a file list on stdin, not both"
 for p in "${PATHS[@]}"; do
     [[ -e $p ]] || die "no such file or directory: $p"
 done
 
-HEADER_CONTENT='C-f:filename | C-e:edit | M-v:invert | M-h:hidden | M-p:pcre2 | Tab:select | M-enter:json | M-/:keys'
-HEADER_FILENAME='C-f:content | C-e:edit | M-v:invert | M-h:hidden | M-p:pcre2 | Tab:select | M-enter:json | M-/:keys'
+HEADER_CONTENT='C-f:filename | C-e:edit | M-v:invert | M-h:hidden | M-p:pcre2 | M-u:unique | C-o:lines | M-enter:json | M-/:keys'
+HEADER_FILENAME='C-f:content | C-e:edit | M-v:invert | M-h:hidden | M-p:pcre2 | M-u:unique | C-o:lines | M-enter:json | M-/:keys'
 
 # Private directory for the helper scripts and state, removed on exit.
 # State files: content-q and file-q hold the saved query of each mode;
-# invert, hidden and pcre2 exist while that toggle is on; nonum exists while preview
-# line numbers are off. rg-fzf-keybindings.txt is the read-only list Alt-/ opens.
+# invert, hidden, pcre2 and unique exist while that toggle is on; nonum exists while
+# preview line numbers are off; input is the NUL-separated file list read from stdin.
+# rg-fzf-keybindings.txt is the read-only list Alt-/ opens.
 STATE=$(mktemp -d)
 SEARCH="$STATE/search.sh"
 ACTIONS="$STATE/actions.sh"
+INPUT=""
 trap 'rm -rf "$STATE"' EXIT
+
+# Read the file list. NUL-separated if it contains a NUL (a filename never does),
+# otherwise one name per line. Duplicates are dropped; names that don't exist are
+# skipped with a warning.
+if [[ $PIPED == 1 ]]; then
+    INPUT="$STATE/input"
+    cat > "$STATE/raw"
+    [[ -s $STATE/raw ]] || die "no files given on stdin"
+    sep=$'\n'
+    IFS= read -r -d '' _ < "$STATE/raw" && sep=''
+    missing=0
+    while IFS= read -r -d "$sep" f || [[ -n $f ]]; do
+        [[ -z $f ]] && continue
+        if [[ -e $f ]]; then printf '%s\0' "$f"; else missing=$((missing + 1)); fi
+    done < "$STATE/raw" > "$STATE/existing"
+    LC_ALL=C sort -zu "$STATE/existing" > "$INPUT"
+    rm -f "$STATE/raw" "$STATE/existing"
+    [[ -s $INPUT ]] || die "none of the files given on stdin exist"
+    [[ $missing -gt 0 ]] && echo "rg-fzf: skipped $missing name(s) from stdin that don't exist" >&2
+fi
 KEYS_FILE="$STATE/rg-fzf-keybindings.txt"
 show_help | sed -n '/^Keybindings:/,/^Examples:/p' | sed '$d' > "$KEYS_FILE"
 chmod 444 "$KEYS_FILE"
@@ -118,8 +150,8 @@ emit_array() {
 {
     echo '#!/bin/bash'
     printf 'S=%q\n' "$STATE"
-    emit_array TYPES "${TYPES[@]}"
     emit_array PATHS "${PATHS[@]}"
+    printf 'INPUT=%q\n' "$INPUT"
     cat << 'SCRIPT'
 FILE_Q=$(cat "$S/file-q" 2>/dev/null)
 [[ $1 == --all-files ]] && { FILE_Q=""; shift; }
@@ -132,14 +164,24 @@ fi
 HIDDEN=()
 [[ -f $S/hidden ]] && HIDDEN=(--hidden)
 
+# Run a command on what to search: the paths given (none means the current
+# directory), or the file list from stdin, passed in batches so any length works
+on_targets() {
+    if [[ -n $INPUT ]]; then
+        xargs -0 -r "$@" -- < "$INPUT"
+    else
+        "$@" -- "${PATHS[@]}"
+    fi
+}
+
 # Files to search, NUL-separated. With a filename filter, fzf picks the names that
 # match it (the same matcher filename mode uses), and only those files get searched.
 list_files() {
     if [[ -n $FILE_Q ]]; then
-        rg --files --null "${HIDDEN[@]}" "${TYPES[@]}" -- "${PATHS[@]}" 2>/dev/null |
+        on_targets rg --files --null "${HIDDEN[@]}" 2>/dev/null |
             fzf --filter "$FILE_Q" --read0 --print0 --no-sort
     else
-        rg --files --null "${HIDDEN[@]}" "${TYPES[@]}" -- "${PATHS[@]}" 2>/dev/null
+        on_targets rg --files --null "${HIDDEN[@]}" 2>/dev/null
     fi
 }
 
@@ -156,18 +198,20 @@ rm -f "$S/listing"
 
 # --engine: ripgrep's default regex engine, or PCRE2 while Alt-P is on
 # --max-columns: shorten huge lines in the list (they are still searched in full)
+# --max-count 1: only each file's first result, while Alt-U is on
 ENGINE=default
 [[ -f $S/pcre2 ]] && ENGINE=pcre2
 RG=(rg --engine "$ENGINE" --ignore-case --column --line-number --no-heading --color=always
     --with-filename --field-match-separator '\x00:' --max-columns 500 --max-columns-preview
-    "${HIDDEN[@]}" "${TYPES[@]}")
+    "${HIDDEN[@]}")
 [[ -f $S/invert ]] && RG+=(--invert-match)
+[[ -f $S/unique ]] && RG+=(--max-count 1)
 
 if [[ -n $FILE_Q ]]; then
     # xargs -r: run nothing if no file matched (rg with no paths would search everything)
     list_files | xargs -0 -r "${RG[@]}" -e "$Q" -- 2>/dev/null
 else
-    "${RG[@]}" -e "$Q" -- "${PATHS[@]}" 2>/dev/null
+    on_targets "${RG[@]}" -e "$Q" 2>/dev/null
 fi
 SCRIPT
 } > "$SEARCH"
@@ -187,6 +231,7 @@ prompt() {
     [[ -f $S/pcre2 ]] && how=pcre2
     [[ -f $S/hidden ]] && flags+="H"
     [[ -f $S/invert ]] && flags+="V"
+    [[ -f $S/unique ]] && flags+="U"
     if [[ $1 == Filename ]]; then
         [[ $how == pcre2 ]] && flags+="P"
         how=fuzzy
@@ -211,7 +256,7 @@ case $1 in
             echo "reload(sleep 0.1; '$SEARCH' {q})"
         fi
         ;;
-    toggle-invert|toggle-hidden|toggle-pcre2)
+    toggle-invert|toggle-hidden|toggle-pcre2|toggle-unique)
         f="$S/${1#toggle-}"
         if [[ -f $f ]]; then rm -f "$f"; else touch "$f"; fi
         if [[ $MODE == Filename ]]; then
@@ -244,16 +289,40 @@ chmod +x "$SEARCH" "$ACTIONS"
 PREVIEW_CMD="if [ -f $(printf '%q' "$STATE/nonum") ]; then set -- --style=plain; else set --; fi;"
 PREVIEW_CMD+=' bat --color=always "$@" --highlight-line {2} -- {1} 2>/dev/null || cat -- {1}'
 
-# fzf prints the query, then the key that closed it (empty for Enter, "alt-enter" for
-# Alt-Enter), then the selected lines. Enter: plain file:line:column:text.
-# Alt-Enter: JSON {query, results}. Each result's full line and matched text come from
-# ripgrep's own JSON output (re-searching just the selected files), never from
-# parsing the displayed line.
+# File names of the result lines on stdin, NUL-terminated. Read in NUL-terminated
+# pieces, a line FILE\0:LINE\0:COLUMN\0:TEXT\n splits into FILE, :LINE, :COLUMN and
+# ":TEXT\nNEXTFILE". So a name is the first piece, or what follows the newline in a
+# piece (TEXT never contains a newline). Bash keeps any byte, so every name survives.
+selected_files() {
+    local piece first=1
+    while IFS= read -r -d '' piece; do
+        if [[ $first == 1 ]]; then
+            first=0
+            printf '%s\0' "$piece"
+        elif [[ $piece == *$'\n'?* ]]; then
+            printf '%s\0' "${piece#*$'\n'}"
+        fi
+    done
+}
+
+# fzf prints the query, then the key that closed it (empty for Enter), then the selected
+# lines. Enter: the files of those lines, unique and sorted, one per line (NUL-separated
+# with -0). Ctrl-O: the lines as file:line:column:text. Alt-Enter: JSON {query, results}.
+# Each result's full line and matched text come from ripgrep's own JSON output
+# (re-searching just the selected files), never from parsing the displayed line.
 print_selection() {
     local query key selection="$STATE/selection" matches="$STATE/matches.json"
     IFS= read -r query || return 0
     IFS= read -r key || return 0
-    if [[ $key != alt-enter ]]; then
+    if [[ -z $key ]]; then
+        if [[ $NUL_OUT == 1 ]]; then
+            LC_ALL=C selected_files | LC_ALL=C sort -zu
+        else
+            LC_ALL=C selected_files | LC_ALL=C sort -zu | tr '\0' '\n'
+        fi
+        return
+    fi
+    if [[ $key == ctrl-o ]]; then
         # LC_ALL=C: treat text as raw bytes, so non-UTF-8 lines pass through intact
         LC_ALL=C tr -d '\0'
         return
@@ -296,7 +365,7 @@ fzf \
   --multi \
   --delimiter '\x00:' \
   --nth 1 \
-  --expect alt-enter \
+  --expect alt-enter,ctrl-o \
   --print-query \
   --prompt 'Content (regex)> ' \
   --header "$HEADER_CONTENT" \
@@ -306,6 +375,7 @@ fzf \
   --bind "alt-v:transform:'$ACTIONS' toggle-invert" \
   --bind "alt-h:transform:'$ACTIONS' toggle-hidden" \
   --bind "alt-p:transform:'$ACTIONS' toggle-pcre2" \
+  --bind "alt-u:transform:'$ACTIONS' toggle-unique" \
   --bind "tab:toggle+up" \
   --bind "shift-tab:toggle+down" \
   --bind "ctrl-a:select-all" \
@@ -319,4 +389,4 @@ fzf \
   --bind "alt-/:execute:${EDITOR:-vim} $(printf '%q' "$KEYS_FILE")" \
   --bind "f1:execute:${EDITOR:-vim} $(printf '%q' "$KEYS_FILE")" \
   --preview "$PREVIEW_CMD" \
-  --preview-window 'up,60%,border-bottom,+{2}+3/3,~3' | print_selection
+  --preview-window 'up,60%,border-bottom,+{2}+3/3,~3' < /dev/null | print_selection
