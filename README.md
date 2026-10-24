@@ -22,7 +22,14 @@ Interactive code search in the terminal. Type a pattern, and [ripgrep](https://g
 | bat | Optional; preview falls back to plain text without it | `brew install bat` | `apt install bat` |
 | jq | Only for JSON output (`Alt-Enter`); included with macOS 15+ | `brew install jq` | `apt install jq` |
 
-Check PCRE2 support with `rg --version` (look for `+pcre2`).
+Check your versions before installing:
+
+```bash
+fzf --version   # needs 0.45 or newer
+rg --version    # look for +pcre2 in the features line, for Alt-P
+```
+
+Linux package managers often ship an older fzf. If `fzf --version` shows less than 0.45, install a newer one from the [fzf releases page](https://github.com/junegunn/fzf/releases) or with `git clone --depth 1 https://github.com/junegunn/fzf.git ~/.fzf && ~/.fzf/install`. With an older fzf, rg-fzf starts but its keybindings fail.
 
 ## Installation
 
