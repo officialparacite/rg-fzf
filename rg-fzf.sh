@@ -20,7 +20,7 @@ Keybindings:
   Ctrl-A      Select all
   Ctrl-Z      Deselect all
   Enter       Print selected lines (or the current line) and exit
-  Alt-Enter   Same, as JSON with the query and matched text (needs jq)
+  Alt-Enter   Same, as JSON with the query and matched text
   Ctrl-P      Toggle preview
   Ctrl-D      Scroll preview down
   Ctrl-U      Scroll preview up
@@ -46,7 +46,7 @@ die() {
     exit 1
 }
 
-for cmd in rg fzf; do
+for cmd in rg fzf bat jq; do
     command -v "$cmd" > /dev/null || die "$cmd is not installed"
 done
 
@@ -257,10 +257,6 @@ print_selection() {
         # LC_ALL=C: treat text as raw bytes, so non-UTF-8 lines pass through intact
         LC_ALL=C tr -d '\0'
         return
-    fi
-    if ! command -v jq > /dev/null; then
-        echo "rg-fzf: jq is needed for JSON output (brew install jq / apt install jq)" >&2
-        return 1
     fi
     # In filename mode the query box holds filename text; use the saved search instead
     [[ -f $STATE/filename-mode ]] && query=$(cat "$STATE/content-q" 2>/dev/null)

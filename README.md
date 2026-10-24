@@ -19,8 +19,10 @@ Interactive code search in the terminal. Type a pattern, and [ripgrep](https://g
 |------|-------|-------|---------------|
 | ripgrep | Needs PCRE2 support for `Alt-P` (Homebrew builds include it) | `brew install ripgrep` | `apt install ripgrep` |
 | fzf | 0.45 or newer | `brew install fzf` | `apt install fzf` |
-| bat | Optional; preview falls back to plain text without it | `brew install bat` | `apt install bat` |
-| jq | Only for JSON output (`Alt-Enter`); included with macOS 15+ | `brew install jq` | `apt install jq` |
+| bat | Syntax highlighting in the preview | `brew install bat` | `apt install bat` |
+| jq | JSON output (`Alt-Enter`); included with macOS 15+ | `brew install jq` | `apt install jq` |
+
+All four are required; rg-fzf checks for them at startup and tells you which one is missing.
 
 Check your versions before installing:
 
@@ -75,7 +77,7 @@ rg-fzf app.ts utils.ts      # search specific files
 | `Tab` / `Shift-Tab` | Toggle selection of a line and move to the next / previous line |
 | `Ctrl-A` / `Ctrl-Z` | Select all / deselect all |
 | `Enter` | Print the selected lines (or the current line) and exit |
-| `Alt-Enter` | Same, but print them as JSON with the query and matched text (needs `jq`) |
+| `Alt-Enter` | Same, but print them as JSON with the query and matched text |
 | `Ctrl-P` | Toggle the preview window |
 | `Ctrl-D` / `Ctrl-U` | Scroll the preview down / up |
 | `Alt-W` | Toggle wrapping of long lines in the preview, so you see each line in full (off by default) |

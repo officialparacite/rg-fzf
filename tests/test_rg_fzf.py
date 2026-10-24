@@ -2,9 +2,9 @@
 """End-to-end tests for rg-fzf: runs the real script in a pseudo-terminal, sends
 keypresses, and reads results back through fzf's --listen API.
 
-Usage: python3 tests/test_rg_fzf.py     (needs rg, fzf, jq; bat optional)
+Usage: python3 tests/test_rg_fzf.py     (needs rg, fzf, bat, jq)
 """
-import fcntl, json, os, urllib.error, pty, re, select, signal, struct, subprocess, sys, tempfile, termios, time, urllib.request
+import fcntl, json, os, shutil, urllib.error, pty, re, select, signal, struct, subprocess, sys, tempfile, termios, time, urllib.request
 
 signal.alarm(360)  # hard stop so the suite can never hang
 SCRIPT = os.environ.get("RGF_SCRIPT") or os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "rg-fzf.sh")
@@ -140,6 +140,18 @@ def cli(*args):
 # ---------- Command-line arguments ----------
 check("-h prints help", cli("-h") == (0, cli("--help")[1]) and "Usage:" in cli("-h")[1])
 check("-h lists the new keys", all(k in cli("-h")[1] for k in ("Alt-W", "Alt-N", "Alt-/  F1")))
+def without(tool):
+    """Runs rg-fzf with a PATH that has every tool it needs except one."""
+    d = tempfile.mkdtemp()
+    for c in ["rg", "fzf", "bat", "jq", "bash", "cat", "sed", "grep", "cut", "tr", "xargs", "mktemp", "chmod", "rm", "touch", "sleep", "sort"]:
+        if c != tool and shutil.which(c):
+            os.symlink(shutil.which(c), f"{d}/{c}")
+    p = subprocess.run(["/bin/bash", SCRIPT], cwd=T, env={"PATH": d, "HOME": H}, capture_output=True, text=True,
+                       stdin=subprocess.DEVNULL, timeout=10)
+    shutil.rmtree(d)
+    return p.returncode, p.stderr.strip()
+for tool in ("rg", "fzf", "bat", "jq"):
+    check(f"refuses to start without {tool}", without(tool) == (1, f"rg-fzf: {tool} is not installed"), without(tool))
 check("-t with no value is an error", cli("-t")[0] == 1 and "needs a file type" in cli("-t")[1])
 check("unknown type is an error", cli("-t", "nosuch")[0] == 1)
 check("'-t j.' is rejected (no regex matching)", cli("-t", "j.")[0] == 1)
